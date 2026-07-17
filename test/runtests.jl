@@ -151,3 +151,36 @@ end
   extension = Powsybl.Network.get_extensions(network, "activePowerControl")
   @test !(generator_id in extension[:, "id"])
 end
+
+@testset "Test multi-dataframe creation (shunts and tap changers)" begin
+  network = Powsybl.Network.create_empty()
+  Powsybl.Network.create_substations(network; id = "S1", country = "FR")
+  Powsybl.Network.create_voltage_levels(network; id = "VL1", substation_id = "S1",
+                                        topology_kind = "BUS_BREAKER", nominal_v = 400.0)
+  Powsybl.Network.create_buses(network; id = "B1", voltage_level_id = "VL1")
+
+  # Linear shunt: dataframe 0 (shunt) + dataframe 1 (linear model), dataframe 2 left empty
+  Powsybl.Network.create_shunt_compensators(network;
+      id = "SHUNT_L", voltage_level_id = "VL1", bus_id = "B1", section_count = 1, model_type = "LINEAR",
+      linear = (id = "SHUNT_L", g_per_section = 0.0, b_per_section = 1e-5, max_section_count = 1))
+  @test "SHUNT_L" in Powsybl.Network.get_shunt_compensators(network)[:, "id"]
+
+  # Non-linear shunt with two sections: dataframe 0 + empty dataframe 1 + dataframe 2
+  Powsybl.Network.create_shunt_compensators(network;
+      id = "SHUNT_NL", voltage_level_id = "VL1", bus_id = "B1", section_count = 1, model_type = "NON_LINEAR",
+      non_linear = (id = ["SHUNT_NL", "SHUNT_NL"], g = [0.0, 0.0], b = [1e-5, 2e-5]))
+  @test "SHUNT_NL" in Powsybl.Network.get_shunt_compensators(network)[:, "id"]
+  sections = Powsybl.Network.get_non_linear_shunt_compensator_sections(network)
+  @test count(==("SHUNT_NL"), sections[:, "id"]) == 2
+
+  # Ratio tap changer with three steps on an existing transformer: dataframe 0 + steps
+  eurostag = Powsybl.Network.create_eurostag_tutorial_example1()
+  Powsybl.Network.create_ratio_tap_changers(eurostag;
+      id = "NGEN_NHV1", tap = 1, low_tap = 0, target_v = 400.0, target_deadband = 0.0, regulating = false,
+      steps = (id = ["NGEN_NHV1", "NGEN_NHV1", "NGEN_NHV1"],
+               g = [0.0, 0.0, 0.0], b = [0.0, 0.0, 0.0], r = [0.0, 0.0, 0.0], x = [0.0, 0.0, 0.0],
+               rho = [0.9, 1.0, 1.1]))
+  @test "NGEN_NHV1" in Powsybl.Network.get_ratio_tap_changers(eurostag)[:, "id"]
+  rtc_steps = Powsybl.Network.get_ratio_tap_changer_steps(eurostag)
+  @test count(==("NGEN_NHV1"), rtc_steps[:, "id"]) == 3
+end
