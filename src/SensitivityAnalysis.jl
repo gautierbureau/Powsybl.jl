@@ -139,30 +139,36 @@ module SensitivityAnalysis
   end
 
   function _run(analysis::SensitivityAnalysisContext, network::Network.NetworkHandle, dc::Bool,
-                parameters::LoadFlow.LoadFlowParameters, provider::String)
+                parameters::LoadFlow.LoadFlowParameters, provider::String, report)
     c_parameters = LoadFlow.load_flow_parameters_to_c_struct(parameters)
-    handle = LibPowsybl.run_sensitivity_analysis(analysis.handle, network.handle, dc, c_parameters, provider)
+    handle = report === nothing ?
+      LibPowsybl.run_sensitivity_analysis(analysis.handle, network.handle, dc, c_parameters, provider) :
+      LibPowsybl.run_sensitivity_analysis_report(analysis.handle, network.handle, dc, c_parameters, provider, report.handle)
     return Result(handle)
   end
 
   """
-      run_ac(analysis, network[, parameters[, provider]]) -> Result
+      run_ac(analysis, network[, parameters[, provider]]; report = nothing) -> Result
 
-  Run the sensitivity analysis in AC.
+  Run the sensitivity analysis in AC. Pass a `Powsybl.Report.ReportNode` as `report` to
+  collect the functional logs.
   """
   function run_ac(analysis::SensitivityAnalysisContext, network::Network.NetworkHandle,
-                  parameters::LoadFlow.LoadFlowParameters = LoadFlow.load_flow_parameters(), provider::String = "")
-    return _run(analysis, network, false, parameters, provider)
+                  parameters::LoadFlow.LoadFlowParameters = LoadFlow.load_flow_parameters(), provider::String = "";
+                  report = nothing)
+    return _run(analysis, network, false, parameters, provider, report)
   end
 
   """
-      run_dc(analysis, network[, parameters[, provider]]) -> Result
+      run_dc(analysis, network[, parameters[, provider]]; report = nothing) -> Result
 
-  Run the sensitivity analysis in DC (the usual mode for PTDF computations).
+  Run the sensitivity analysis in DC (the usual mode for PTDF computations). See
+  [`run_ac`](@ref).
   """
   function run_dc(analysis::SensitivityAnalysisContext, network::Network.NetworkHandle,
-                  parameters::LoadFlow.LoadFlowParameters = LoadFlow.load_flow_parameters(), provider::String = "")
-    return _run(analysis, network, true, parameters, provider)
+                  parameters::LoadFlow.LoadFlowParameters = LoadFlow.load_flow_parameters(), provider::String = "";
+                  report = nothing)
+    return _run(analysis, network, true, parameters, provider, report)
   end
 
   function _matrix_to_julia(m)
