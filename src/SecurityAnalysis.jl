@@ -118,32 +118,37 @@ module SecurityAnalysis
   end
 
   function _run(analysis::SecurityAnalysisContext, network::Network.NetworkHandle,
-                parameters::LoadFlow.LoadFlowParameters, provider::String, dc::Bool)
+                parameters::LoadFlow.LoadFlowParameters, provider::String, dc::Bool, report)
     c_parameters = LoadFlow.load_flow_parameters_to_c_struct(parameters)
-    handle = LibPowsybl.run_security_analysis(analysis.handle, network.handle, c_parameters, provider, dc)
+    handle = report === nothing ?
+      LibPowsybl.run_security_analysis(analysis.handle, network.handle, c_parameters, provider, dc) :
+      LibPowsybl.run_security_analysis_report(analysis.handle, network.handle, c_parameters, provider, dc, report.handle)
     return Result(handle)
   end
 
   """
-      run_ac(analysis, network[, parameters[, provider]]) -> Result
+      run_ac(analysis, network[, parameters[, provider]]; report = nothing) -> Result
 
   Run the security analysis in AC. Security-analysis-specific limit thresholds keep their
   default values; `parameters` are the load flow parameters used for the base case and
-  every contingency.
+  every contingency. Pass a `Powsybl.Report.ReportNode` as `report` to collect the
+  functional logs.
   """
   function run_ac(analysis::SecurityAnalysisContext, network::Network.NetworkHandle,
-                  parameters::LoadFlow.LoadFlowParameters = LoadFlow.load_flow_parameters(), provider::String = "")
-    return _run(analysis, network, parameters, provider, false)
+                  parameters::LoadFlow.LoadFlowParameters = LoadFlow.load_flow_parameters(), provider::String = "";
+                  report = nothing)
+    return _run(analysis, network, parameters, provider, false, report)
   end
 
   """
-      run_dc(analysis, network[, parameters[, provider]]) -> Result
+      run_dc(analysis, network[, parameters[, provider]]; report = nothing) -> Result
 
   Run the security analysis in DC. See [`run_ac`](@ref).
   """
   function run_dc(analysis::SecurityAnalysisContext, network::Network.NetworkHandle,
-                  parameters::LoadFlow.LoadFlowParameters = LoadFlow.load_flow_parameters(), provider::String = "")
-    return _run(analysis, network, parameters, provider, true)
+                  parameters::LoadFlow.LoadFlowParameters = LoadFlow.load_flow_parameters(), provider::String = "";
+                  report = nothing)
+    return _run(analysis, network, parameters, provider, true, report)
   end
 
   """
