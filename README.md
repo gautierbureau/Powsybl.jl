@@ -445,6 +445,11 @@ Elements can be created and updated with an API mirroring pypowsybl: one keyword
 per column, each value a scalar (a single element) or a vector (several elements at once).
 Columns are coerced to the type declared by the element's dataframe schema, so numeric
 literals work without an explicit type. The `id` column identifies the elements.
+### Reporting
+
+Most operations can collect PowSyBl's functional logs into a report node — a tree of
+typed messages describing what happened (iterations, applied corrections, warnings). Pass
+a report node via the `report` argument and render it afterwards.
 
 ```julia
 julia> using Powsybl
@@ -589,3 +594,17 @@ julia> Powsybl.Network.create_ratio_tap_changers(network;
 `create_phase_tap_changers` works the same way, with an extra `alpha` column in the
 steps. The generic `create_elements(network, element_type, column_sets)` (a vector with
 one column set per dataframe) covers any multi-dataframe element type.
+julia> report = Powsybl.Report.create_report_node()
+
+# Collect the load flow logs
+julia> network = Powsybl.Network.create_ieee9()
+julia> parameters = Powsybl.LoadFlow.load_flow_parameters()
+julia> Powsybl.LoadFlow.run_ac(network, parameters; report = report)
+
+# A report node can be reused across operations (e.g. import then solve)
+julia> network2 = Powsybl.Network.load("case.xiidm"; report = report)
+
+# Render it as text (also shown when the report node is displayed) or as JSON
+julia> print(Powsybl.Report.to_string(report))
+julia> Powsybl.Report.to_json(report)
+```

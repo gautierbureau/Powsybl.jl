@@ -352,4 +352,25 @@ end
   @test "NGEN_NHV1" in Powsybl.Network.get_ratio_tap_changers(eurostag)[:, "id"]
   rtc_steps = Powsybl.Network.get_ratio_tap_changer_steps(eurostag)
   @test count(==("NGEN_NHV1"), rtc_steps[:, "id"]) == 3
+@testset "Test reporting" begin
+  report = Powsybl.Report.create_report_node()
+
+  # Load flow with a report node collects functional logs
+  network = Powsybl.Network.create_ieee9()
+  parameters = Powsybl.LoadFlow.load_flow_parameters()
+  result = Powsybl.LoadFlow.run_ac(network, parameters; report = report)
+  @test result.component_results[1, :].status == Powsybl.LoadFlow.CONVERGED
+
+  text = Powsybl.Report.to_string(report)
+  @test text isa String
+  @test !isempty(text)
+
+  json = Powsybl.Report.to_json(report)
+  @test occursin("{", json)
+
+  # Network import with a report node
+  import_report = Powsybl.Report.create_report_node()
+  imported = Powsybl.Network.load("simple-eu.xiidm"; report = import_report)
+  @test imported.name == "simple-eu"
+  @test !isempty(Powsybl.Report.to_string(import_report))
 end

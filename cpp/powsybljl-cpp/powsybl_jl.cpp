@@ -873,4 +873,32 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
             for (const auto& m : pypowsybl::getNetworkExtensionsDataframeMetadata(name, tableName)) { result.push_back(m.isIndex() ? 1 : 0); }
             return result;
     }, "Get the index flags of the update dataframe of an extension");
+  // ===========================================================================
+  // Reporting (ReportNode)
+  // ===========================================================================
+
+  mod.method("create_report_node", [] (std::string const& taskKey, std::string const& defaultName) {
+            return pypowsybl::createReportNode(taskKey, defaultName);
+    }, "Create a report node collecting functional logs");
+
+  mod.method("print_report", [] (pypowsybl::JavaHandle reportNode) {
+            return pypowsybl::printReport(reportNode);
+    }, "Render a report node as a text tree");
+
+  mod.method("json_report", [] (pypowsybl::JavaHandle reportNode) {
+            return pypowsybl::jsonReport(reportNode);
+    }, "Render a report node as JSON");
+
+  // Report-aware variants: they thread a report node through the underlying call so it
+  // collects the functional logs produced during execution.
+  mod.method("load_report", [] (std::string const& file, StringStringMap& parameters,
+                                std::vector<std::string>& postProcessors, pypowsybl::JavaHandle reportNode) {
+            return pypowsybl::loadNetwork(file, parameters, postProcessors, &reportNode, false);
+    }, "Load a network from a file, collecting logs into a report node");
+
+  mod.method("run_load_flow_report", [] (const pypowsybl::JavaHandle& network, const pypowsybl::LoadFlowParameters& parameters,
+                                         bool dc, const std::string& provider, pypowsybl::JavaHandle reportNode) {
+            pypowsybl::LoadFlowComponentResultArray* results = pypowsybl::runLoadFlow(network, dc, parameters, provider, &reportNode);
+            return powsybl_array_to_julia(results);
+    }, "Run a load flow, collecting logs into a report node");
 }
