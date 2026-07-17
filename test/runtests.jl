@@ -86,3 +86,26 @@ end
   result = Powsybl.LoadFlow.run_dc(network, parameters)
   @test size(result.component_results, 1) == 1
 end
+
+@testset "Test reporting" begin
+  report = Powsybl.Report.create_report_node()
+
+  # Load flow with a report node collects functional logs
+  network = Powsybl.Network.create_ieee9()
+  parameters = Powsybl.LoadFlow.load_flow_parameters()
+  result = Powsybl.LoadFlow.run_ac(network, parameters; report = report)
+  @test result.component_results[1, :].status == Powsybl.LoadFlow.CONVERGED
+
+  text = Powsybl.Report.to_string(report)
+  @test text isa String
+  @test !isempty(text)
+
+  json = Powsybl.Report.to_json(report)
+  @test occursin("{", json)
+
+  # Network import with a report node
+  import_report = Powsybl.Report.create_report_node()
+  imported = Powsybl.Network.load("simple-eu.xiidm"; report = import_report)
+  @test imported.name == "simple-eu"
+  @test !isempty(Powsybl.Report.to_string(import_report))
+end
