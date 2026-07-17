@@ -42,12 +42,11 @@ public:
         appendSeries(index, 2, intData_.back().data(), (int) intData_.back().size());
     }
     void add_bool_series(const std::string& name, bool index, const std::vector<int>& values) {
+        // Boolean series are marshalled as 4-byte ints (0/1), exactly like int
+        // series: the Java side reads type 2 and 3 from an int* buffer.
         names_.push_back(name);
-        boolData_.emplace_back();
-        std::vector<char>& stored = boolData_.back();
-        stored.reserve(values.size());
-        for (int v : values) { stored.push_back((char) (v != 0)); }
-        appendSeries(index, 3, stored.data(), (int) stored.size());
+        intData_.push_back(values);
+        appendSeries(index, 3, intData_.back().data(), (int) intData_.back().size());
     }
     dataframe build_dataframe() {
         dataframe df;
@@ -71,7 +70,6 @@ private:
     std::list<std::vector<char*>> stringPtrs_;
     std::list<std::vector<double>> doubleData_;
     std::list<std::vector<int>> intData_;
-    std::list<std::vector<char>> boolData_;
     std::vector<series> series_;
 };
 
