@@ -253,24 +253,45 @@ module Network
 
   function _fill_builder!(builder, kwargs, meta_names, meta_types, meta_indices)
     type_by_name = Dict{String, Int}()
+    ordered_names = String[]
     index_names = Set{String}()
     for (name, type_code, is_index) in zip(meta_names, meta_types, meta_indices)
       column_name = String(name)
       type_by_name[column_name] = Int(type_code)
+      push!(ordered_names, column_name)
       if Int(is_index) != 0
         push!(index_names, column_name)
       end
     end
 
+    # Secondary creation dataframes (e.g. shunt sections, tap-changer steps) do not flag
+    # an index column in their metadata, yet the Java side keys their rows on the first
+    # column (the id). Mirror pypowsybl, which sends that column as the dataframe index.
+    if isempty(index_names) && !isempty(ordered_names)
+      push!(index_names, ordered_names[1])
+    end
+
+    provided = collect(kwargs)
+
+    # An empty dataframe (e.g. the non-linear sections of a linear shunt) must still carry
+    # its index column with zero rows, as pypowsybl does; a truly empty dataframe crashes
+    # or is rejected by the Java side.
+    if isempty(provided)
+      for name in index_names
+        _add_series!(builder, name, true, get(type_by_name, name, 0), Int[])
+      end
+      return builder
+    end
+
     # Number of rows = longest provided vector column (scalars are broadcast).
     row_count = 1
-    for (_, value) in kwargs
+    for (_, value) in provided
       if value isa AbstractVector
         row_count = max(row_count, length(value))
       end
     end
 
-    for (key, value) in kwargs
+    for (key, value) in provided
       column_name = String(key)
       column = value isa AbstractVector ? collect(value) : fill(value, row_count)
       if length(column) == 1 && row_count > 1
@@ -280,17 +301,20 @@ module Network
       end
 
       type_code = get(type_by_name, column_name, _infer_series_type(column))
-      is_index = column_name in index_names
+      _add_series!(builder, column_name, column_name in index_names, type_code, column)
+    end
+    return builder
+  end
 
-      if type_code == 0
-        LibPowsybl.add_string_series(builder, column_name, is_index, StdVector{StdString}(String.(column)))
-      elseif type_code == 1
-        LibPowsybl.add_double_series(builder, column_name, is_index, StdVector{Float64}(Float64.(column)))
-      elseif type_code == 2
-        LibPowsybl.add_int_series(builder, column_name, is_index, StdVector{Cint}(Cint.(column)))
-      elseif type_code == 3
-        LibPowsybl.add_bool_series(builder, column_name, is_index, StdVector{Cint}(Cint.(Bool.(column))))
-      end
+  function _add_series!(builder, name, is_index, type_code, column)
+    if type_code == 0
+      LibPowsybl.add_string_series(builder, name, is_index, StdVector{StdString}(String.(column)))
+    elseif type_code == 1
+      LibPowsybl.add_double_series(builder, name, is_index, StdVector{Float64}(Float64.(column)))
+    elseif type_code == 2
+      LibPowsybl.add_int_series(builder, name, is_index, StdVector{Cint}(Cint.(column)))
+    elseif type_code == 3
+      LibPowsybl.add_bool_series(builder, name, is_index, StdVector{Cint}(Cint.(Bool.(column))))
     end
     return builder
   end
@@ -326,6 +350,67 @@ module Network
                    LibPowsybl.get_element_metadata_indices(element_type))
     LibPowsybl.update_element(network.handle, builder, element_type, per_unit, nominal_apparent_power)
     return nothing
+  end
+
+  """
+      create_elements(network, element_type, column_sets::AbstractVector)
+
+  Create elements that need several dataframes (shunt compensators with their
+  linear/non-linear sections, tap changers with their steps). `column_sets` holds one
+  column set (a NamedTuple, `Dict`, or the pairs of a keyword list) per dataframe, in the
+  order given by the creation schema. Trailing dataframes may be omitted and any dataframe
+  may be left empty (`(;)`).
+  """
+  function create_elements(network::NetworkHandle, element_type::LibPowsybl.ElementType, column_sets::AbstractVector)
+    builder = LibPowsybl.ElementDataframe()
+    dataframe_count = LibPowsybl.get_element_creation_dataframes_count(element_type)
+    for i in 0:(dataframe_count - 1)
+      columns = (i + 1) <= length(column_sets) ? column_sets[i + 1] : (;)
+      _fill_builder!(builder, pairs(columns),
+                     LibPowsybl.get_element_creation_metadata_names_at(element_type, i),
+                     LibPowsybl.get_element_creation_metadata_types_at(element_type, i),
+                     LibPowsybl.get_element_creation_metadata_indices_at(element_type, i))
+      LibPowsybl.finish_dataframe(builder)
+    end
+    LibPowsybl.create_element(network.handle, builder, element_type)
+    return nothing
+  end
+
+  """
+      create_shunt_compensators(network; linear = nothing, non_linear = nothing, kwargs...)
+
+  Create shunt compensators. The keyword arguments describe the shunt compensators
+  themselves; the sections are given either as a `linear` model
+  (`g_per_section`, `b_per_section`, `max_section_count`) or as a `non_linear` set of
+  sections (`g`, `b`, one row per section). Both `linear` and `non_linear` are column
+  sets (NamedTuples) whose `id` links back to the shunt.
+  """
+  function create_shunt_compensators(network::NetworkHandle; linear = nothing, non_linear = nothing, kwargs...)
+    return create_elements(network, LibPowsybl.SHUNT_COMPENSATOR,
+                           Any[kwargs,
+                               linear === nothing ? (;) : linear,
+                               non_linear === nothing ? (;) : non_linear])
+  end
+
+  """
+      create_ratio_tap_changers(network; steps, kwargs...)
+
+  Create ratio tap changers. The keyword arguments describe the tap changers (their `id`
+  is the transformer they are added to); `steps` is a column set with one row per step
+  (`r`, `x`, `g`, `b`, `rho`).
+  """
+  function create_ratio_tap_changers(network::NetworkHandle; steps, kwargs...)
+    return create_elements(network, LibPowsybl.RATIO_TAP_CHANGER, Any[kwargs, steps])
+  end
+
+  """
+      create_phase_tap_changers(network; steps, kwargs...)
+
+  Create phase tap changers. Like [`create_ratio_tap_changers`](@ref), but the `steps`
+  additionally carry an `alpha` (phase shift) column.
+  """
+  function create_phase_tap_changers(network::NetworkHandle; steps, kwargs...)
+    return create_elements(network, LibPowsybl.PHASE_TAP_CHANGER, Any[kwargs, steps])
   end
 
   # Convenience creators, one per single-dataframe element type, mirroring pypowsybl.

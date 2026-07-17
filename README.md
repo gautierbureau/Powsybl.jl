@@ -378,3 +378,31 @@ Convenience creators are available for `substations`, `voltage_levels`, `buses`,
 `update_elements(network, element_type; kwargs...)` cover any element type. To discover
 the available columns of a dataframe, inspect an existing element table (e.g.
 `Powsybl.Network.get_loads(network, true)` for all attributes).
+
+Some elements are described by several dataframes: a shunt compensator plus its
+linear or non-linear sections, or a tap changer plus its steps. Dedicated helpers take
+the extra dataframes as column sets (NamedTuples):
+
+```julia
+# Linear shunt compensator
+julia> Powsybl.Network.create_shunt_compensators(network;
+           id = "SHUNT", voltage_level_id = "VL1", bus_id = "B1",
+           section_count = 1, model_type = "LINEAR",
+           linear = (id = "SHUNT", g_per_section = 0.0, b_per_section = 1e-5, max_section_count = 1))
+
+# Non-linear shunt compensator (one row per section)
+julia> Powsybl.Network.create_shunt_compensators(network;
+           id = "SHUNT2", voltage_level_id = "VL1", bus_id = "B1",
+           section_count = 1, model_type = "NON_LINEAR",
+           non_linear = (id = ["SHUNT2", "SHUNT2"], g = [0.0, 0.0], b = [1e-5, 2e-5]))
+
+# Ratio tap changer with steps on a transformer
+julia> Powsybl.Network.create_ratio_tap_changers(network;
+           id = "TWT", tap = 1, low_tap = 0, target_v = 400.0, regulating = false,
+           steps = (id = ["TWT", "TWT", "TWT"], g = [0.0, 0.0, 0.0], b = [0.0, 0.0, 0.0],
+                    r = [0.0, 0.0, 0.0], x = [0.0, 0.0, 0.0], rho = [0.9, 1.0, 1.1]))
+```
+
+`create_phase_tap_changers` works the same way, with an extra `alpha` column in the
+steps. The generic `create_elements(network, element_type, column_sets)` (a vector with
+one column set per dataframe) covers any multi-dataframe element type.
