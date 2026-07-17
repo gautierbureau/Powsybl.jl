@@ -548,6 +548,14 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
             return pypowsybl::runSensitivityAnalysis(analysisContext, network, dc, *parameters, provider, nullptr);
     }, "Run a sensitivity analysis");
 
+  mod.method("run_sensitivity_analysis_report", [] (pypowsybl::JavaHandle analysisContext, pypowsybl::JavaHandle network,
+                                                    bool dc, const pypowsybl::LoadFlowParameters& loadflowParameters,
+                                                    std::string const& provider, pypowsybl::JavaHandle reportNode) {
+            std::shared_ptr<pypowsybl::SensitivityAnalysisParameters> parameters(pypowsybl::createSensitivityAnalysisParameters());
+            parameters->loadflow_parameters = loadflowParameters;
+            return pypowsybl::runSensitivityAnalysis(analysisContext, network, dc, *parameters, provider, &reportNode);
+    }, "Run a sensitivity analysis, collecting logs into a report node");
+
   mod.method("get_sensitivity_matrix", [] (pypowsybl::JavaHandle result, std::string const& matrixId, std::string const& contingencyId) {
             return pypowsybl::getSensitivityMatrix(result, matrixId, contingencyId);
     }, "Get the sensitivity values matrix of a factor matrix for a given contingency");
