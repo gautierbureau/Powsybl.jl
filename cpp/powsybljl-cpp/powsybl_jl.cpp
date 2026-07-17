@@ -10,6 +10,8 @@
 #include <memory>
 #include <iostream>
 #include <thread>
+#include <mutex>
+#include <vector>
 
 #include "jlcxx/jlcxx.hpp"
 #include "powsybl-cpp.h"
@@ -22,8 +24,32 @@ template <> struct jlcxx::IsMirroredType<slack_bus_result> : std::false_type {};
 
 using StringStringMap = std::map<std::string, std::string>;
 
+// The Java side emits log events (including stack traces at DEBUG/TRACE) through the
+// logger callback below. Since that callback runs on the Java call thread, we simply
+// buffer the formatted messages under a mutex and expose them to Julia; the desired
+// verbosity is controlled with setLogLevel (see set_log_level).
+static std::mutex g_logMutex;
+static std::vector<std::string> g_logMessages;
+// Log level requested from Julia, re-applied before every Java call so it survives.
+static bool g_logLevelConfigured = false;
+static int g_logLevel = 20;
+
+static std::string logLevelName(int level) {
+  switch (level) {
+    case 0:  return "TRACE";
+    case 10: return "DEBUG";
+    case 20: return "INFO";
+    case 30: return "WARN";
+    case 40: return "ERROR";
+    default: return "LEVEL" + std::to_string(level);
+  }
+}
+
 void logFromJava(int level, long timestamp, char* loggerName, char* message) {
-  //TODO Redirect log properly to julia logger
+  std::lock_guard<std::mutex> lock(g_logMutex);
+  std::string logger = loggerName ? std::string(loggerName) : std::string();
+  std::string text = message ? std::string(message) : std::string();
+  g_logMessages.push_back("[" + logLevelName(level) + "] " + logger + " - " + text);
 }
 
 // Template lambda returning an attribute of a class instance
@@ -138,7 +164,13 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
   mod.set_const("DEFAULT_ATTRIBUTES", filter_attributes_type::DEFAULT_ATTRIBUTES);
   mod.set_const("SELECTION_ATTRIBUTES", filter_attributes_type::SELECTION_ATTRIBUTES);
 
-  auto preJavaCall = [](pypowsybl::GraalVmGuard* guard, exception_handler* exc){ };
+  auto preJavaCall = [](pypowsybl::GraalVmGuard* guard, exception_handler* exc){
+    // Re-apply the requested log level before each Java call so it keeps effect, the same
+    // way pypowsybl drives it from the Python logger level.
+    if (g_logLevelConfigured) {
+      ::setLogLevel(guard->thread(), g_logLevel, exc);
+    }
+  };
   auto postJavaCall = [](){ };
   pypowsybl::init(preJavaCall, postJavaCall);
   auto fptr = &::logFromJava;
@@ -341,4 +373,24 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
             pypowsybl::LoadFlowComponentResultArray* results = pypowsybl::runLoadFlow(network, dc, parameters, provider, &reportNode);
             return powsybl_array_to_julia(results);
     }, "Run a load flow, collecting logs into a report node");
+
+  // ===========================================================================
+  // Java logging capture
+  // ===========================================================================
+
+  mod.method("set_log_level", [] (int level) {
+            g_logLevel = level;
+            g_logLevelConfigured = true;
+            pypowsybl::PowsyblCaller::get()->callJava<>(::setLogLevel, level);
+    }, "Set the PowSyBl (Java) log level; lower levels (DEBUG/TRACE) include stack traces");
+
+  mod.method("get_java_log_messages", [] () {
+            std::lock_guard<std::mutex> lock(g_logMutex);
+            return g_logMessages;
+    }, "Get the Java log messages collected since the last clear");
+
+  mod.method("clear_java_log", [] () {
+            std::lock_guard<std::mutex> lock(g_logMutex);
+            g_logMessages.clear();
+    }, "Clear the collected Java log messages");
 }

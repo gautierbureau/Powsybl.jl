@@ -109,3 +109,25 @@ end
   @test imported.name == "simple-eu"
   @test !isempty(Powsybl.Report.to_string(import_report))
 end
+
+@testset "Test Java logging" begin
+  Powsybl.Log.set_level(Powsybl.Log.INFO)
+  Powsybl.Log.clear()
+  @test isempty(Powsybl.Log.get_messages())
+
+  network = Powsybl.Network.create_ieee9()
+  Powsybl.LoadFlow.run_ac(network, Powsybl.LoadFlow.load_flow_parameters())
+  info_messages = Powsybl.Log.get_messages()
+  @test info_messages isa Vector{String}
+  @test !isempty(info_messages)
+  @test any(message -> occursin("OpenLoadFlow", message), info_messages)
+
+  # A lower level yields more detail (DEBUG includes the Java stack traces)
+  Powsybl.Log.set_level(Powsybl.Log.DEBUG)
+  Powsybl.Log.clear()
+  Powsybl.LoadFlow.run_ac(Powsybl.Network.create_ieee9(), Powsybl.LoadFlow.load_flow_parameters())
+  @test length(Powsybl.Log.get_messages()) >= length(info_messages)
+
+  Powsybl.Log.clear()
+  @test isempty(Powsybl.Log.get_messages())
+end
