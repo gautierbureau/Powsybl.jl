@@ -19,6 +19,8 @@ template <> struct jlcxx::IsMirroredType<series> : std::false_type {};
 template <> struct jlcxx::IsMirroredType<network_metadata> : std::false_type {};
 template <> struct jlcxx::IsMirroredType<loadflow_component_result> : std::false_type {};
 template <> struct jlcxx::IsMirroredType<slack_bus_result> : std::false_type {};
+template <> struct jlcxx::IsMirroredType<pre_contingency_result> : std::false_type {};
+template <> struct jlcxx::IsMirroredType<post_contingency_result> : std::false_type {};
 
 using StringStringMap = std::map<std::string, std::string>;
 
@@ -312,4 +314,92 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
   mod.method("create_loadflow_provider_parameters_series_array", [] (const std::string& provider) {
             return pypowsybl::createLoadFlowProviderParametersSeriesArray(provider);
     }, "Create a parameters series array for a given loadflow provider");
+
+  // ===========================================================================
+  // Security analysis
+  // ===========================================================================
+
+  // ContingencyContextType
+  mod.add_bits<contingency_context_type>("ContingencyContextType", jlcxx::julia_type("CppEnum"));
+  mod.set_const("CONTINGENCY_CONTEXT_ALL", contingency_context_type::ALL);
+  mod.set_const("CONTINGENCY_CONTEXT_NONE", contingency_context_type::NONE);
+  mod.set_const("CONTINGENCY_CONTEXT_SPECIFIC", contingency_context_type::SPECIFIC);
+  mod.set_const("CONTINGENCY_CONTEXT_ONLY_CONTINGENCIES", contingency_context_type::ONLY_CONTINGENCIES);
+
+  // PostContingencyComputationStatus (used for both pre- and post-contingency results)
+  mod.add_bits<pypowsybl::PostContingencyComputationStatus>("PostContingencyComputationStatus", jlcxx::julia_type("CppEnum"));
+  mod.set_const("POST_CONTINGENCY_CONVERGED", pypowsybl::PostContingencyComputationStatus::CONVERGED);
+  mod.set_const("POST_CONTINGENCY_MAX_ITERATION_REACHED", pypowsybl::PostContingencyComputationStatus::MAX_ITERATION_REACHED);
+  mod.set_const("POST_CONTINGENCY_SOLVER_FAILED", pypowsybl::PostContingencyComputationStatus::SOLVER_FAILED);
+  mod.set_const("POST_CONTINGENCY_FAILED", pypowsybl::PostContingencyComputationStatus::FAILED);
+  mod.set_const("POST_CONTINGENCY_NO_IMPACT", pypowsybl::PostContingencyComputationStatus::NO_IMPACT);
+
+  mod.add_type<pre_contingency_result>("PreContingencyResult")
+          .method("status", [](const pre_contingency_result& r) {
+             return static_cast<pypowsybl::PostContingencyComputationStatus>(r.status);
+          });
+
+  mod.add_type<post_contingency_result>("PostContingencyResult")
+          .method("contingency_id", [](const post_contingency_result& r) {
+             return std::string(r.contingency_id);
+          })
+          .method("status", [](const post_contingency_result& r) {
+             return static_cast<pypowsybl::PostContingencyComputationStatus>(r.status);
+          });
+
+  mod.method("create_security_analysis", [] () {
+            return pypowsybl::createSecurityAnalysis();
+    }, "Create a security analysis context");
+
+  mod.method("add_contingency", [] (pypowsybl::JavaHandle analysisContext, std::string const& contingencyId,
+                                    std::vector<std::string> const& elementsIds) {
+            pypowsybl::addContingency(analysisContext, contingencyId, elementsIds);
+    }, "Add a contingency (list of element ids to trip) to a security analysis context");
+
+  mod.method("add_monitored_elements", [] (pypowsybl::JavaHandle analysisContext, contingency_context_type contingencyContextType,
+                                           std::vector<std::string> const& branchIds,
+                                           std::vector<std::string> const& voltageLevelIds,
+                                           std::vector<std::string> const& threeWindingsTransformerIds,
+                                           std::vector<std::string> const& contingencyIds) {
+            pypowsybl::addMonitoredElements(analysisContext, contingencyContextType, branchIds, voltageLevelIds,
+                                            threeWindingsTransformerIds, contingencyIds);
+    }, "Add monitored elements to a security analysis context");
+
+  // Runs a security analysis using default security-analysis thresholds and the provided
+  // load flow parameters. Returns a handle to the security analysis result.
+  mod.method("run_security_analysis", [] (pypowsybl::JavaHandle analysisContext, pypowsybl::JavaHandle network,
+                                          const pypowsybl::LoadFlowParameters& loadflowParameters,
+                                          std::string const& provider, bool dc) {
+            std::shared_ptr<pypowsybl::SecurityAnalysisParameters> parameters(pypowsybl::createSecurityAnalysisParameters());
+            parameters->loadflow_parameters = loadflowParameters;
+            return pypowsybl::runSecurityAnalysis(analysisContext, network, *parameters, provider, dc, nullptr);
+    }, "Run a security analysis");
+
+  mod.method("get_pre_contingency_result", [] (pypowsybl::JavaHandle result) {
+            return pypowsybl::getPreContingencyResult(result);
+    }, "Get the pre-contingency result of a security analysis");
+
+  mod.method("get_post_contingency_results", [] (pypowsybl::JavaHandle result) {
+            return powsybl_array_to_julia<post_contingency_result>(pypowsybl::getPostContingencyResults(result));
+    }, "Get the post-contingency results of a security analysis");
+
+  mod.method("get_security_analysis_limit_violations", [] (pypowsybl::JavaHandle result) {
+            return pypowsybl::getLimitViolations(result);
+    }, "Get all the limit violations of a security analysis result");
+
+  mod.method("get_security_analysis_branch_results", [] (pypowsybl::JavaHandle result) {
+            return pypowsybl::getBranchResults(result);
+    }, "Get the monitored branch results of a security analysis result");
+
+  mod.method("get_security_analysis_bus_results", [] (pypowsybl::JavaHandle result) {
+            return pypowsybl::getBusResults(result);
+    }, "Get the monitored bus results of a security analysis result");
+
+  mod.method("get_security_analysis_three_windings_transformer_results", [] (pypowsybl::JavaHandle result) {
+            return pypowsybl::getThreeWindingsTransformerResults(result);
+    }, "Get the monitored three windings transformer results of a security analysis result");
+
+  mod.method("get_security_analysis_provider_names", [] () {
+            return pypowsybl::getSecurityAnalysisProviderNames();
+    }, "Get the names of the available security analysis providers");
 }
