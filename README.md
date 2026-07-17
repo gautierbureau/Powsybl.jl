@@ -318,3 +318,52 @@ julia> Powsybl.Network.get_buses(network)
    8 │ VL6_0           101.265   -3.6874                      0                      0  VL6
    9 │ VL8_0           101.588    0.727537                    0                      0  VL8
 ````
+
+### Security analysis module
+
+A security analysis checks a network against a set of contingencies (element outages)
+and reports the resulting limit violations. It is driven through the `SecurityAnalysis`
+submodule.
+
+```julia
+julia> using Powsybl
+
+julia> network = Powsybl.Network.create_ieee9()
+
+# Build a security analysis context: declare contingencies and monitored elements
+julia> analysis = Powsybl.SecurityAnalysis.create()
+julia> Powsybl.SecurityAnalysis.add_single_element_contingency(analysis, "L7-8-0")
+julia> Powsybl.SecurityAnalysis.add_multiple_elements_contingency(analysis, ["L9-8-0", "L7-5-0"], "double")
+julia> Powsybl.SecurityAnalysis.add_monitored_elements(analysis; branch_ids = ["L9-6-0"])
+
+# Run it (AC here, run_dc is also available). The load flow parameters are optional.
+julia> parameters = Powsybl.LoadFlow.load_flow_parameters()
+julia> result = Powsybl.SecurityAnalysis.run_ac(analysis, network, parameters)
+```
+
+The result exposes the computation status of the base case and of each contingency, the
+limit violations, and the detailed results on the monitored elements:
+
+```julia
+julia> Powsybl.SecurityAnalysis.get_pre_contingency_result(result)
+CONVERGED::ComputationStatus = 0
+
+julia> Powsybl.SecurityAnalysis.get_post_contingency_results(result)
+2×2 DataFrame
+ Row │ contingency_id  status
+     │ String          Computa…
+─────┼──────────────────────────
+   1 │ L7-8-0          CONVERGED
+   2 │ double          CONVERGED
+
+julia> Powsybl.SecurityAnalysis.get_limit_violations(result)
+julia> Powsybl.SecurityAnalysis.get_branch_results(result)
+julia> Powsybl.SecurityAnalysis.get_bus_results(result)
+julia> Powsybl.SecurityAnalysis.get_three_windings_transformer_results(result)
+```
+
+Contingencies can be built one element at a time (`add_single_element_contingency`), as
+simultaneous multi-element outages (`add_multiple_elements_contingency`), or in bulk
+(`add_single_element_contingencies`). Monitored elements accept a
+`contingency_context_type` (`ALL`, `NONE`, `SPECIFIC`, `ONLY_CONTINGENCIES`) to select
+the states in which they are observed.
