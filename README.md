@@ -304,6 +304,28 @@ julia> Powsybl.Network.get_extensions_names()
  "substationPosition"
 ```
 
+Extensions can also be created, updated and removed. As for elements, each keyword
+argument is a column of the extension's dataframe (scalar or vector), coerced to the type
+declared by its schema; the index column is usually the `id` of the element the extension
+is attached to.
+
+```julia
+julia> network = Powsybl.Network.create_eurostag_tutorial_example1()
+
+# Attach an activePowerControl extension to a generator
+julia> Powsybl.Network.create_extensions(network, "activePowerControl";
+           id = "GEN", droop = 4.0, participate = true)
+
+julia> Powsybl.Network.get_extensions(network, "activePowerControl")
+
+# Update it, then remove it
+julia> Powsybl.Network.update_extensions(network, "activePowerControl"; id = "GEN", droop = 8.0)
+julia> Powsybl.Network.remove_extensions(network, "activePowerControl", "GEN")
+
+# Describe every available extension
+julia> Powsybl.Network.get_extensions_information()
+```
+
 ### Load flow module
 
 A load flow computation can be done using the LoadFlow submodule.
