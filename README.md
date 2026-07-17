@@ -608,3 +608,29 @@ julia> network2 = Powsybl.Network.load("case.xiidm"; report = report)
 julia> print(Powsybl.Report.to_string(report))
 julia> Powsybl.Report.to_json(report)
 ```
+
+### Java logs and stack traces
+
+PowSyBl's own (Java) logs — including stack traces at the finer levels — can be captured
+for debugging through the `Log` submodule. Lower the level to see more detail, run the
+operation, then read back the collected messages.
+
+```julia
+julia> using Powsybl
+
+julia> Powsybl.Log.set_level(Powsybl.Log.DEBUG)   # TRACE / DEBUG / INFO / WARN / ERROR
+julia> Powsybl.Log.clear()
+
+julia> network = Powsybl.Network.create_ieee9()
+julia> Powsybl.LoadFlow.run_ac(network, Powsybl.LoadFlow.load_flow_parameters())
+
+julia> for message in Powsybl.Log.get_messages()
+           println(message)
+       end
+[INFO] com.powsybl.openloadflow.OpenLoadFlowProvider - Version: ...
+[DEBUG] com.powsybl.openloadflow.ac.AcloadFlowEngine - Start AC load flow on ...
+...
+```
+
+Each message is formatted as `"[LEVEL] logger - message"`. `Powsybl.Log.clear()` resets
+the buffer.
