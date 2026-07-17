@@ -48,13 +48,41 @@ public:
         intData_.push_back(values);
         appendSeries(index, 3, intData_.back().data(), (int) intData_.back().size());
     }
+    // Close the current dataframe and start a new one. Used to build the several
+    // dataframes some element types need at creation (e.g. a shunt compensator plus
+    // its linear/non-linear sections, or a tap changer plus its steps).
+    void finish_dataframe() {
+        frames_.push_back(current_);
+        current_.clear();
+    }
+    // Single dataframe (the columns added since the last finish_dataframe). Used for
+    // updates and single-dataframe extension creation.
     dataframe build_dataframe() {
-        dataframe df;
-        df.series = series_.data();
-        df.series_count = (int) series_.size();
-        return df;
+        return makeDataframe(current_);
+    }
+    // All the dataframes to create an element: the finished frames, or the current one
+    // when finish_dataframe was never called (the single-dataframe case).
+    std::vector<dataframe> build_dataframes() {
+        std::vector<dataframe> result;
+        if (!frames_.empty()) {
+            for (std::vector<series>& frame : frames_) {
+                result.push_back(makeDataframe(frame));
+            }
+        } else {
+            result.push_back(makeDataframe(current_));
+        }
+        return result;
     }
 private:
+    // An empty dataframe must still carry a valid (non-null) series pointer, matching
+    // pypowsybl which always allocates the series array even for zero columns; a null
+    // pointer crashes the Java dataframe reader.
+    dataframe makeDataframe(std::vector<series>& frame) {
+        dataframe df;
+        df.series = frame.empty() ? &emptySeries_ : frame.data();
+        df.series_count = (int) frame.size();
+        return df;
+    }
     void appendSeries(bool index, int type, void* ptr, int length) {
         series s;
         s.name = const_cast<char*>(names_.back().c_str());
@@ -63,14 +91,16 @@ private:
         s.data.ptr = ptr;
         s.data.length = length;
         s.mask = nullptr;
-        series_.push_back(s);
+        current_.push_back(s);
     }
     std::list<std::string> names_;
     std::list<std::vector<std::string>> stringData_;
     std::list<std::vector<char*>> stringPtrs_;
     std::list<std::vector<double>> doubleData_;
     std::list<std::vector<int>> intData_;
-    std::vector<series> series_;
+    std::vector<series> current_;
+    std::list<std::vector<series>> frames_;
+    series emptySeries_{};
 };
 
 // Necessary to compile to map struct with no constructor ?
@@ -389,13 +419,16 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
         })
         .method("add_bool_series", [] (ElementDataframe& b, std::string const& name, bool index, std::vector<int> const& values) {
             b.add_bool_series(name, index, values);
+        })
+        .method("finish_dataframe", [] (ElementDataframe& b) {
+            b.finish_dataframe();
         });
 
   mod.method("create_element", [] (pypowsybl::JavaHandle network, ElementDataframe& builder, element_type type) {
-            dataframe df = builder.build_dataframe();
+            std::vector<dataframe> dfs = builder.build_dataframes();
             dataframe_array dataframes;
-            dataframes.dataframes = &df;
-            dataframes.dataframes_count = 1;
+            dataframes.dataframes = dfs.data();
+            dataframes.dataframes_count = (int) dfs.size();
             pypowsybl::createElement(network, &dataframes, type);
     }, "Create network elements of a given type from a dataframe builder");
 
@@ -445,6 +478,39 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
             if (!metadata.empty()) { for (const auto& m : metadata[0]) { result.push_back(m.isIndex() ? 1 : 0); } }
             return result;
     }, "Get the index flags of the creation dataframe of an element type");
+
+  // Per-dataframe creation metadata, for element types that need several dataframes
+  // (shunt compensators with their sections, tap changers with their steps, ...).
+  mod.method("get_element_creation_dataframes_count", [] (element_type type) {
+            return (int) pypowsybl::getNetworkElementCreationDataframesMetadata(type).size();
+    }, "Get the number of dataframes needed to create an element type");
+
+  mod.method("get_element_creation_metadata_names_at", [] (element_type type, int dataframeIndex) {
+            std::vector<std::string> result;
+            auto metadata = pypowsybl::getNetworkElementCreationDataframesMetadata(type);
+            if (dataframeIndex >= 0 && dataframeIndex < (int) metadata.size()) {
+                for (const auto& m : metadata[dataframeIndex]) { result.push_back(m.name()); }
+            }
+            return result;
+    }, "Get the series names of the i-th creation dataframe of an element type");
+
+  mod.method("get_element_creation_metadata_types_at", [] (element_type type, int dataframeIndex) {
+            std::vector<int> result;
+            auto metadata = pypowsybl::getNetworkElementCreationDataframesMetadata(type);
+            if (dataframeIndex >= 0 && dataframeIndex < (int) metadata.size()) {
+                for (const auto& m : metadata[dataframeIndex]) { result.push_back(m.type()); }
+            }
+            return result;
+    }, "Get the series types of the i-th creation dataframe of an element type");
+
+  mod.method("get_element_creation_metadata_indices_at", [] (element_type type, int dataframeIndex) {
+            std::vector<int> result;
+            auto metadata = pypowsybl::getNetworkElementCreationDataframesMetadata(type);
+            if (dataframeIndex >= 0 && dataframeIndex < (int) metadata.size()) {
+                for (const auto& m : metadata[dataframeIndex]) { result.push_back(m.isIndex() ? 1 : 0); }
+            }
+            return result;
+    }, "Get the index flags of the i-th creation dataframe of an element type");
 
   // ===========================================================================
   // Extension creation / update / removal (reuses the ElementDataframe builder)
