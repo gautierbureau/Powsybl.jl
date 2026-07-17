@@ -312,4 +312,45 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
   mod.method("create_loadflow_provider_parameters_series_array", [] (const std::string& provider) {
             return pypowsybl::createLoadFlowProviderParametersSeriesArray(provider);
     }, "Create a parameters series array for a given loadflow provider");
+
+  // ===========================================================================
+  // Single line diagram (SLD) and network area diagram (NAD)
+  // ===========================================================================
+  // Default diagram parameters are built inside each wrapper and the optional
+  // per-element override dataframes are left null, so no parameter/dataframe type
+  // needs to be marshalled from Julia.
+
+  mod.method("get_single_line_diagram_svg", [] (pypowsybl::JavaHandle network, std::string const& containerId) {
+            return pypowsybl::getSingleLineDiagramSvg(network, containerId);
+    }, "Get the single line diagram of a voltage level or substation as an SVG string");
+
+  mod.method("write_single_line_diagram_svg", [] (pypowsybl::JavaHandle network, std::string const& containerId,
+                                                  std::string const& svgFile, std::string const& metadataFile) {
+            std::shared_ptr<pypowsybl::SldParameters> parameters(pypowsybl::createSldParameters());
+            pypowsybl::writeSingleLineDiagramSvg(network, containerId, svgFile, metadataFile, *parameters, nullptr, nullptr, nullptr);
+    }, "Write the single line diagram of a voltage level or substation to an SVG file");
+
+  mod.method("get_single_line_diagram_component_library_names", [] () {
+            return pypowsybl::getSingleLineDiagramComponentLibraryNames();
+    }, "Get the names of the available single line diagram component libraries");
+
+  mod.method("get_network_area_diagram_svg", [] (pypowsybl::JavaHandle network, std::vector<std::string> const& voltageLevelIds,
+                                                 int depth, double highNominalVoltageBound, double lowNominalVoltageBound) {
+            std::shared_ptr<pypowsybl::NadParameters> parameters(pypowsybl::createNadParameters());
+            return pypowsybl::getNetworkAreaDiagramSvg(network, voltageLevelIds, depth, highNominalVoltageBound, lowNominalVoltageBound, *parameters);
+    }, "Get the network area diagram as an SVG string");
+
+  mod.method("write_network_area_diagram_svg", [] (pypowsybl::JavaHandle network, std::string const& svgFile, std::string const& metadataFile,
+                                                   std::vector<std::string> const& voltageLevelIds, int depth,
+                                                   double highNominalVoltageBound, double lowNominalVoltageBound) {
+            std::shared_ptr<pypowsybl::NadParameters> parameters(pypowsybl::createNadParameters());
+            pypowsybl::writeNetworkAreaDiagramSvg(network, svgFile, metadataFile, voltageLevelIds, depth,
+                                                  highNominalVoltageBound, lowNominalVoltageBound, *parameters,
+                                                  nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    }, "Write the network area diagram to an SVG file");
+
+  mod.method("get_network_area_diagram_displayed_voltage_levels", [] (pypowsybl::JavaHandle network,
+                                                                      std::vector<std::string> const& voltageLevelIds, int depth) {
+            return pypowsybl::getNetworkAreaDiagramDisplayedVoltageLevels(network, voltageLevelIds, depth);
+    }, "Get the voltage levels displayed in a network area diagram for the given filter");
 }

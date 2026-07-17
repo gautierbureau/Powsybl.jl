@@ -86,3 +86,37 @@ end
   result = Powsybl.LoadFlow.run_dc(network, parameters)
   @test size(result.component_results, 1) == 1
 end
+
+@testset "Test single line diagram" begin
+  network = Powsybl.Network.create_ieee9()
+  vl_id = Powsybl.Network.get_voltage_levels(network)[1, "id"]
+
+  svg = Powsybl.Diagram.get_single_line_diagram_svg(network, vl_id)
+  @test svg isa String
+  @test occursin("<svg", svg)
+
+  @test !isempty(Powsybl.Diagram.get_single_line_diagram_component_library_names())
+
+  svg_file = tempname() * ".svg"
+  Powsybl.Diagram.write_single_line_diagram_svg(network, vl_id, svg_file)
+  @test isfile(svg_file)
+  @test filesize(svg_file) > 0
+end
+
+@testset "Test network area diagram" begin
+  network = Powsybl.Network.create_ieee9()
+  vl_id = Powsybl.Network.get_voltage_levels(network)[1, "id"]
+
+  svg = Powsybl.Diagram.get_network_area_diagram_svg(network; voltage_level_ids = [vl_id], depth = 1)
+  @test svg isa String
+  @test occursin("<svg", svg)
+
+  displayed = Powsybl.Diagram.get_network_area_diagram_displayed_voltage_levels(network, [vl_id], 1)
+  @test displayed isa Vector{String}
+  @test vl_id in displayed
+
+  svg_file = tempname() * ".svg"
+  Powsybl.Diagram.write_network_area_diagram_svg(network, svg_file)
+  @test isfile(svg_file)
+  @test filesize(svg_file) > 0
+end
