@@ -123,3 +123,31 @@ end
   @test "B2" in buses[:, "id"]
   @test "B3" in buses[:, "id"]
 end
+
+@testset "Test extension creation, update and removal" begin
+  @test "activePowerControl" in Powsybl.Network.get_extensions_names()
+  @test size(Powsybl.Network.get_extensions_information(), 1) >= 1
+
+  network = Powsybl.Network.create_eurostag_tutorial_example1()
+  generator_id = Powsybl.Network.get_generators(network)[1, "id"]
+
+  # Create an activePowerControl extension on the generator
+  Powsybl.Network.create_extensions(network, "activePowerControl";
+                                    id = generator_id, droop = 4.0, participate = true)
+  extension = Powsybl.Network.get_extensions(network, "activePowerControl")
+  @test generator_id in extension[:, "id"]
+  row = findfirst(==(generator_id), extension[:, "id"])
+  @test extension[row, "droop"] == 4.0
+  @test extension[row, "participate"] == true          # exercises the boolean marshalling
+
+  # Update it
+  Powsybl.Network.update_extensions(network, "activePowerControl"; id = generator_id, droop = 8.0)
+  extension = Powsybl.Network.get_extensions(network, "activePowerControl")
+  row = findfirst(==(generator_id), extension[:, "id"])
+  @test extension[row, "droop"] == 8.0
+
+  # Remove it
+  Powsybl.Network.remove_extensions(network, "activePowerControl", generator_id)
+  extension = Powsybl.Network.get_extensions(network, "activePowerControl")
+  @test !(generator_id in extension[:, "id"])
+end

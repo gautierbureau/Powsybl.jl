@@ -362,5 +362,75 @@ module Network
   update_lcc_converter_stations(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.LCC_CONVERTER_STATION; kwargs...)
   update_hvdc_lines(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.HVDC_LINE; kwargs...)
 
+  # ---------------------------------------------------------------------------
+  # Extension creation, update and removal
+  #
+  # Same keyword-argument style as element creation: one column per keyword,
+  # scalar or vector, coerced to the type declared by the extension's dataframe
+  # schema. The index column is typically the id of the element the extension
+  # is attached to.
+  # ---------------------------------------------------------------------------
+
+  """
+      get_extensions_information() -> DataFrame
+
+  Return a DataFrame describing all the extensions supported by the underlying PowSyBl
+  installation (name, attributes, ...).
+  """
+  function get_extensions_information()
+    series_array = LibPowsybl.get_extensions_information()
+    return create_dataframe_from_series_array(series_array[])
+  end
+
+  """
+      create_extensions(network, extension_name; kwargs...)
+
+  Create extensions of type `extension_name` (e.g. `"activePowerControl"`). Each keyword
+  argument is a column of the extension's creation dataframe; the index column is usually
+  `id` (the element the extension is attached to). See [`get_extensions_names`](@ref) for
+  the available extension types.
+  """
+  function create_extensions(network::NetworkHandle, extension_name::String; kwargs...)
+    builder = LibPowsybl.ElementDataframe()
+    _fill_builder!(builder, kwargs,
+                   LibPowsybl.get_extension_creation_metadata_names(extension_name),
+                   LibPowsybl.get_extension_creation_metadata_types(extension_name),
+                   LibPowsybl.get_extension_creation_metadata_indices(extension_name))
+    LibPowsybl.create_extensions(network.handle, builder, extension_name)
+    return nothing
+  end
+
+  """
+      update_extensions(network, extension_name; table_name = "", kwargs...)
+
+  Update existing extensions of type `extension_name`. Some extensions expose several
+  tables (e.g. a main table and a secondary one); `table_name` selects which one to
+  update (empty for the default table).
+  """
+  function update_extensions(network::NetworkHandle, extension_name::String; table_name::String = "", kwargs...)
+    builder = LibPowsybl.ElementDataframe()
+    _fill_builder!(builder, kwargs,
+                   LibPowsybl.get_extension_metadata_names(extension_name, table_name),
+                   LibPowsybl.get_extension_metadata_types(extension_name, table_name),
+                   LibPowsybl.get_extension_metadata_indices(extension_name, table_name))
+    LibPowsybl.update_extension(network.handle, builder, extension_name, table_name)
+    return nothing
+  end
+
+  """
+      remove_extensions(network, extension_name, ids)
+      remove_extensions(network, extension_name, id)
+
+  Remove the extensions of type `extension_name` from the elements with the given ids.
+  """
+  function remove_extensions(network::NetworkHandle, extension_name::String, ids::Vector{String})
+    LibPowsybl.remove_extensions(network.handle, extension_name, StdVector{StdString}(ids))
+    return nothing
+  end
+
+  function remove_extensions(network::NetworkHandle, extension_name::String, id::String)
+    return remove_extensions(network, extension_name, [id])
+  end
+
   include("NetworkCreationUtils.jl")
 end

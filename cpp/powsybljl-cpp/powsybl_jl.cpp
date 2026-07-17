@@ -445,4 +445,68 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
             if (!metadata.empty()) { for (const auto& m : metadata[0]) { result.push_back(m.isIndex() ? 1 : 0); } }
             return result;
     }, "Get the index flags of the creation dataframe of an element type");
+
+  // ===========================================================================
+  // Extension creation / update / removal (reuses the ElementDataframe builder)
+  // ===========================================================================
+
+  mod.method("create_extensions", [] (pypowsybl::JavaHandle network, ElementDataframe& builder, std::string name) {
+            dataframe df = builder.build_dataframe();
+            dataframe_array dataframes;
+            dataframes.dataframes = &df;
+            dataframes.dataframes_count = 1;
+            pypowsybl::createExtensions(network, &dataframes, name);
+    }, "Create extensions of a given name from a dataframe builder");
+
+  mod.method("update_extension", [] (pypowsybl::JavaHandle network, ElementDataframe& builder, std::string name, std::string tableName) {
+            dataframe df = builder.build_dataframe();
+            pypowsybl::updateNetworkElementsExtensionsWithSeries(network, name, tableName, &df);
+    }, "Update extensions of a given name from a dataframe builder");
+
+  mod.method("remove_extensions", [] (pypowsybl::JavaHandle network, std::string name, std::vector<std::string> const& ids) {
+            pypowsybl::removeExtensions(network, name, ids);
+    }, "Remove the extensions of a given name from the elements with the given ids");
+
+  mod.method("get_extensions_information", [] () {
+            return pypowsybl::getExtensionsInformation();
+    }, "Get a dataframe describing all the available extensions");
+
+  mod.method("get_extension_creation_metadata_names", [] (std::string name) {
+            std::vector<std::string> result;
+            auto metadata = pypowsybl::getNetworkExtensionsCreationDataframesMetadata(name);
+            if (!metadata.empty()) { for (const auto& m : metadata[0]) { result.push_back(m.name()); } }
+            return result;
+    }, "Get the series names of the creation dataframe of an extension");
+
+  mod.method("get_extension_creation_metadata_types", [] (std::string name) {
+            std::vector<int> result;
+            auto metadata = pypowsybl::getNetworkExtensionsCreationDataframesMetadata(name);
+            if (!metadata.empty()) { for (const auto& m : metadata[0]) { result.push_back(m.type()); } }
+            return result;
+    }, "Get the series types of the creation dataframe of an extension");
+
+  mod.method("get_extension_creation_metadata_indices", [] (std::string name) {
+            std::vector<int> result;
+            auto metadata = pypowsybl::getNetworkExtensionsCreationDataframesMetadata(name);
+            if (!metadata.empty()) { for (const auto& m : metadata[0]) { result.push_back(m.isIndex() ? 1 : 0); } }
+            return result;
+    }, "Get the index flags of the creation dataframe of an extension");
+
+  mod.method("get_extension_metadata_names", [] (std::string name, std::string tableName) {
+            std::vector<std::string> result;
+            for (const auto& m : pypowsybl::getNetworkExtensionsDataframeMetadata(name, tableName)) { result.push_back(m.name()); }
+            return result;
+    }, "Get the series names of the update dataframe of an extension");
+
+  mod.method("get_extension_metadata_types", [] (std::string name, std::string tableName) {
+            std::vector<int> result;
+            for (const auto& m : pypowsybl::getNetworkExtensionsDataframeMetadata(name, tableName)) { result.push_back(m.type()); }
+            return result;
+    }, "Get the series types of the update dataframe of an extension");
+
+  mod.method("get_extension_metadata_indices", [] (std::string name, std::string tableName) {
+            std::vector<int> result;
+            for (const auto& m : pypowsybl::getNetworkExtensionsDataframeMetadata(name, tableName)) { result.push_back(m.isIndex() ? 1 : 0); }
+            return result;
+    }, "Get the index flags of the update dataframe of an extension");
 }
