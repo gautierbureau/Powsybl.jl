@@ -470,6 +470,14 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
             return pypowsybl::runSecurityAnalysis(analysisContext, network, *parameters, provider, dc, nullptr);
     }, "Run a security analysis");
 
+  mod.method("run_security_analysis_report", [] (pypowsybl::JavaHandle analysisContext, pypowsybl::JavaHandle network,
+                                                 const pypowsybl::LoadFlowParameters& loadflowParameters,
+                                                 std::string const& provider, bool dc, pypowsybl::JavaHandle reportNode) {
+            std::shared_ptr<pypowsybl::SecurityAnalysisParameters> parameters(pypowsybl::createSecurityAnalysisParameters());
+            parameters->loadflow_parameters = loadflowParameters;
+            return pypowsybl::runSecurityAnalysis(analysisContext, network, *parameters, provider, dc, &reportNode);
+    }, "Run a security analysis, collecting logs into a report node");
+
   mod.method("get_pre_contingency_result", [] (pypowsybl::JavaHandle result) {
             return pypowsybl::getPreContingencyResult(result);
     }, "Get the pre-contingency result of a security analysis");
