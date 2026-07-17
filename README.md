@@ -411,6 +411,12 @@ submodule.
 A sensitivity analysis computes how monitored quantities (typically branch flows) react
 to variations of chosen variables (typically injections) — for instance PTDF matrices.
 It is driven through the `SensitivityAnalysis` submodule.
+### Diagrams (single line and network area)
+
+Networks can be rendered to SVG through the `Diagram` submodule, either as a string
+(handy to display inline in Pluto / IJulia notebooks) or written to a file.
+
+A **single line diagram** shows the detailed topology of one voltage level or substation:
 
 ```julia
 julia> using Powsybl
@@ -476,3 +482,27 @@ For finer control, `add_factor_matrix` takes the function/variable element ids p
 contingencies. Post-contingency sensitivities are obtained by declaring contingencies
 (`add_single_element_contingency` / `add_multiple_elements_contingency`) and passing the
 contingency id to `get_sensitivity_matrix`.
+# As an SVG string
+julia> svg = Powsybl.Diagram.get_single_line_diagram_svg(network, "VL1")
+
+# Or written to a file
+julia> Powsybl.Diagram.write_single_line_diagram_svg(network, "VL1", "vl1.svg")
+
+julia> Powsybl.Diagram.get_single_line_diagram_component_library_names()
+```
+
+A **network area diagram** gives a schematic, substation-level view of (part of) the
+network. With no voltage level id the whole network is drawn; otherwise the diagram is
+centered on the given voltage levels and expanded by `depth` hops:
+
+```julia
+# Whole network
+julia> svg = Powsybl.Diagram.get_network_area_diagram_svg(network)
+
+# Around one voltage level, two hops out, written to a file
+julia> Powsybl.Diagram.write_network_area_diagram_svg(network, "nad.svg";
+           voltage_level_ids = ["VL1"], depth = 2)
+
+# Which voltage levels would that diagram contain?
+julia> Powsybl.Diagram.get_network_area_diagram_displayed_voltage_levels(network, ["VL1"], 2)
+```

@@ -21,4 +21,5 @@ module Powsybl
   end
   include("SecurityAnalysis.jl")
   include("SensitivityAnalysis.jl")
+  include("Diagram.jl")
 end
