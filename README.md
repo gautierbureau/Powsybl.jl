@@ -406,6 +406,11 @@ julia> Powsybl.Network.get_buses(network)
 A security analysis checks a network against a set of contingencies (element outages)
 and reports the resulting limit violations. It is driven through the `SecurityAnalysis`
 submodule.
+### Sensitivity analysis module
+
+A sensitivity analysis computes how monitored quantities (typically branch flows) react
+to variations of chosen variables (typically injections) — for instance PTDF matrices.
+It is driven through the `SensitivityAnalysis` submodule.
 
 ```julia
 julia> using Powsybl
@@ -449,3 +454,25 @@ simultaneous multi-element outages (`add_multiple_elements_contingency`), or in 
 (`add_single_element_contingencies`). Monitored elements accept a
 `contingency_context_type` (`ALL`, `NONE`, `SPECIFIC`, `ONLY_CONTINGENCIES`) to select
 the states in which they are observed.
+julia> generators = Powsybl.Network.get_generators(network)[:, "id"]
+julia> branches = ["L7-8-0", "L9-8-0", "L7-5-0"]
+
+# Register a branch-flow factor matrix (sensitivities of branch flows w.r.t. injections)
+julia> analysis = Powsybl.SensitivityAnalysis.create()
+julia> Powsybl.SensitivityAnalysis.set_branch_flow_factor_matrix(analysis, branches, generators)
+
+# Run it in DC (run_ac is also available)
+julia> result = Powsybl.SensitivityAnalysis.run_dc(analysis, network)
+
+# The sensitivity matrix and the reference (base-case) function values
+julia> Powsybl.SensitivityAnalysis.get_sensitivity_matrix(result)
+julia> Powsybl.SensitivityAnalysis.get_reference_matrix(result)
+```
+
+For finer control, `add_factor_matrix` takes the function/variable element ids plus a
+`sensitivity_function_type` (e.g. `BRANCH_ACTIVE_POWER_1`, `BRANCH_CURRENT_1`,
+`BUS_VOLTAGE`), a `sensitivity_variable_type` (e.g. `AUTO_DETECT`,
+`INJECTION_ACTIVE_POWER`, `TRANSFORMER_PHASE`, `BUS_TARGET_VOLTAGE`) and, optionally,
+contingencies. Post-contingency sensitivities are obtained by declaring contingencies
+(`add_single_element_contingency` / `add_multiple_elements_contingency`) and passing the
+contingency id to `get_sensitivity_matrix`.

@@ -20,4 +20,5 @@ module Powsybl
     return String(LibPowsybl.get_version_table())
   end
   include("SecurityAnalysis.jl")
+  include("SensitivityAnalysis.jl")
 end
