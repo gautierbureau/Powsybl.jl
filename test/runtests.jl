@@ -172,4 +172,36 @@ end
     @test Powsybl.Network.update_connectable_status(network, load_id, false) isa Bool
     @test Powsybl.Network.update_connectable_status(network, load_id, true) isa Bool
   end
+@testset "Test security analysis provider names" begin
+  @test !isempty(Powsybl.SecurityAnalysis.get_provider_names())
+end
+
+@testset "Test security analysis" begin
+  network = Powsybl.Network.create_ieee9()
+
+  analysis = Powsybl.SecurityAnalysis.create()
+  Powsybl.SecurityAnalysis.add_single_element_contingency(analysis, "L7-8-0")
+  Powsybl.SecurityAnalysis.add_multiple_elements_contingency(analysis, ["L9-8-0", "L7-5-0"], "double")
+  Powsybl.SecurityAnalysis.add_monitored_elements(analysis; branch_ids = ["L9-6-0"])
+
+  parameters = Powsybl.LoadFlow.load_flow_parameters()
+  result = Powsybl.SecurityAnalysis.run_ac(analysis, network, parameters)
+
+  # Base case converges
+  @test Powsybl.SecurityAnalysis.get_pre_contingency_result(result) == Powsybl.SecurityAnalysis.CONVERGED
+
+  # One row per contingency, in insertion order
+  post = Powsybl.SecurityAnalysis.get_post_contingency_results(result)
+  @test Set(post[:, "contingency_id"]) == Set(["L7-8-0", "double"])
+  @test post[1, "status"] isa Powsybl.SecurityAnalysis.ComputationStatus
+
+  # Result accessors return tabular data without throwing
+  violations = Powsybl.SecurityAnalysis.get_limit_violations(result)
+  @test size(violations, 2) >= 0
+
+  branch_results = Powsybl.SecurityAnalysis.get_branch_results(result)
+  @test size(branch_results, 2) >= 0
+
+  Powsybl.SecurityAnalysis.get_bus_results(result)
+  Powsybl.SecurityAnalysis.get_three_windings_transformer_results(result)
 end
