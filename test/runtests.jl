@@ -86,3 +86,40 @@ end
   result = Powsybl.LoadFlow.run_dc(network, parameters)
   @test size(result.component_results, 1) == 1
 end
+
+@testset "Test element creation and update" begin
+  network = Powsybl.Network.create_empty()
+
+  Powsybl.Network.create_substations(network; id = "S1", country = "FR")
+  Powsybl.Network.create_voltage_levels(network; id = "VL1", substation_id = "S1",
+                                        topology_kind = "BUS_BREAKER", nominal_v = 400.0)
+  Powsybl.Network.create_buses(network; id = "B1", voltage_level_id = "VL1")
+  Powsybl.Network.create_loads(network; id = "LOAD1", voltage_level_id = "VL1", bus_id = "B1",
+                               p0 = 100.0, q0 = 10.0)
+  Powsybl.Network.create_generators(network; id = "GEN1", voltage_level_id = "VL1", bus_id = "B1",
+                                    target_p = 100.0, min_p = 0.0, max_p = 1000.0,
+                                    target_v = 400.0, voltage_regulator_on = true)
+
+  substations = Powsybl.Network.get_substations(network)
+  @test "S1" in substations[:, "id"]
+
+  loads = Powsybl.Network.get_loads(network)
+  @test "LOAD1" in loads[:, "id"]
+  load_row = findfirst(==("LOAD1"), loads[:, "id"])
+  @test loads[load_row, "p0"] == 100.0
+
+  generators = Powsybl.Network.get_generators(network)
+  @test "GEN1" in generators[:, "id"]
+
+  # Update an existing element
+  Powsybl.Network.update_loads(network; id = "LOAD1", p0 = 200.0)
+  loads = Powsybl.Network.get_loads(network)
+  load_row = findfirst(==("LOAD1"), loads[:, "id"])
+  @test loads[load_row, "p0"] == 200.0
+
+  # Create several elements in a single call
+  Powsybl.Network.create_buses(network; id = ["B2", "B3"], voltage_level_id = ["VL1", "VL1"])
+  buses = Powsybl.Network.get_bus_breaker_view_buses(network)
+  @test "B2" in buses[:, "id"]
+  @test "B3" in buses[:, "id"]
+end
