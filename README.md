@@ -417,6 +417,12 @@ Networks can be rendered to SVG through the `Diagram` submodule, either as a str
 (handy to display inline in Pluto / IJulia notebooks) or written to a file.
 
 A **single line diagram** shows the detailed topology of one voltage level or substation:
+### Creating and updating elements
+
+Elements can be created and updated with an API mirroring pypowsybl: one keyword argument
+per column, each value a scalar (a single element) or a vector (several elements at once).
+Columns are coerced to the type declared by the element's dataframe schema, so numeric
+literals work without an explicit type. The `id` column identifies the elements.
 
 ```julia
 julia> using Powsybl
@@ -506,3 +512,30 @@ julia> Powsybl.Diagram.write_network_area_diagram_svg(network, "nad.svg";
 # Which voltage levels would that diagram contain?
 julia> Powsybl.Diagram.get_network_area_diagram_displayed_voltage_levels(network, ["VL1"], 2)
 ```
+julia> network = Powsybl.Network.create_empty()
+
+julia> Powsybl.Network.create_substations(network; id = "S1", country = "FR")
+julia> Powsybl.Network.create_voltage_levels(network; id = "VL1", substation_id = "S1",
+           topology_kind = "BUS_BREAKER", nominal_v = 400.0)
+julia> Powsybl.Network.create_buses(network; id = "B1", voltage_level_id = "VL1")
+julia> Powsybl.Network.create_loads(network; id = "LOAD1", voltage_level_id = "VL1",
+           bus_id = "B1", p0 = 100.0, q0 = 10.0)
+julia> Powsybl.Network.create_generators(network; id = "GEN1", voltage_level_id = "VL1",
+           bus_id = "B1", target_p = 100.0, min_p = 0.0, max_p = 1000.0,
+           target_v = 400.0, voltage_regulator_on = true)
+
+# Update existing elements (id selects them, the other columns are the new values)
+julia> Powsybl.Network.update_loads(network; id = "LOAD1", p0 = 200.0)
+
+# Create several elements at once by passing vectors
+julia> Powsybl.Network.create_buses(network; id = ["B2", "B3"], voltage_level_id = ["VL1", "VL1"])
+```
+
+Convenience creators are available for `substations`, `voltage_levels`, `buses`,
+`busbar_sections`, `loads`, `generators`, `batteries`, `dangling_lines`, `lines`,
+`2_windings_transformers`, `switches`, `static_var_compensators`,
+`lcc_converter_stations`, `vsc_converter_stations` and `hvdc_lines`, plus matching
+`update_*` helpers. The generic `create_elements(network, element_type; kwargs...)` and
+`update_elements(network, element_type; kwargs...)` cover any element type. To discover
+the available columns of a dataframe, inspect an existing element table (e.g.
+`Powsybl.Network.get_loads(network, true)` for all attributes).
