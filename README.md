@@ -175,6 +175,28 @@ julia> Powsybl.Network.save(network, "Ouput.xiidm", "XIIDM", Dict("iidm.export.x
 
 See the [documentation](https://powsybl.readthedocs.io/projects/powsybl-core/en/v6.5.1/grid_exchange_formats/index.html) for available export parameters.
 
+### In-memory and probing I/O
+
+Networks can also be read from and written to strings instead of files, an existing
+network refreshed from a file, and a file probed to check whether it is loadable.
+
+```julia
+julia> network = Powsybl.Network.load("case.xiidm")
+
+# Export to a string (the format is given explicitly)
+julia> content = Powsybl.Network.save_to_string(network, "XIIDM")
+
+# Load from a string (the file name is used only for its extension, i.e. the format)
+julia> network = Powsybl.Network.load_from_string("case.xiidm", content)
+
+# Check whether a file can be imported as a network
+julia> Powsybl.Network.is_network_loadable("case.xiidm")
+true
+
+# Update an existing network in place from a file (importer-dependent; CGMES supports it)
+julia> Powsybl.Network.update_network(network, "updated_state.zip")
+```
+
 ### Network extensions
 
 Network extensions can be accessed through a call to Powsybl.Network.get_extensions
