@@ -57,6 +57,47 @@ module Network
     return create_dataframe_from_series_array(series_array[])
   end
 
+  """
+      set_per_unit(value::Bool)
+
+  Enable or disable per-unit values for element data reads. When enabled, the `get_*`
+  element accessors return quantities in per-unit (relative to the nominal voltage and
+  [`get_nominal_apparent_power`](@ref)) instead of physical units.
+
+  This is a module-wide setting affecting every subsequent element read on any network,
+  until changed; it is disabled by default.
+  """
+  function set_per_unit(value::Bool)
+    global per_unit = value
+    return nothing
+  end
+
+  """
+      is_per_unit() -> Bool
+
+  Whether element data reads currently return per-unit values (see [`set_per_unit`](@ref)).
+  """
+  is_per_unit() = per_unit
+
+  """
+      set_nominal_apparent_power(value::Real)
+
+  Set the nominal apparent power in MVA used as the base for per-unit values. Module-wide,
+  `100.0` by default. Only relevant when [`set_per_unit`](@ref) is enabled.
+  """
+  function set_nominal_apparent_power(value::Real)
+    global nominal_apparent_power = Float64(value)
+    return nothing
+  end
+
+  """
+      get_nominal_apparent_power() -> Float64
+
+  The nominal apparent power in MVA used as the base for per-unit values
+  (see [`set_nominal_apparent_power`](@ref)).
+  """
+  get_nominal_apparent_power() = nominal_apparent_power
+
   function get_buses(network::NetworkHandle, all_attributes::Bool = false, attributes::Vector{String} = Vector{String}())
     return get_elements(network, LibPowsybl.BUS, all_attributes, attributes)
   end
