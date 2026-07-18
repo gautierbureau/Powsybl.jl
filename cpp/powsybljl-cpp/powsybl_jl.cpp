@@ -1428,4 +1428,16 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
   mod.method("get_rao_cost_results", [] (pypowsybl::JavaHandle crac, pypowsybl::JavaHandle result) {
             return pypowsybl::getCostResults(crac, result);
     }, "Get the cost results of a RAO result");
+
+  mod.method("run_voltage_monitoring", [] (pypowsybl::JavaHandle network, pypowsybl::JavaHandle result, pypowsybl::JavaHandle crac,
+                                           pypowsybl::JavaHandle rao, const pypowsybl::LoadFlowParameters& parameters,
+                                           std::string const& provider) {
+            return pypowsybl::runVoltageMonitoring(network, result, crac, rao, parameters, provider);
+    }, "Run voltage monitoring on a RAO result, returning an enriched result");
+
+  mod.method("run_angle_monitoring", [] (pypowsybl::JavaHandle network, pypowsybl::JavaHandle result, pypowsybl::JavaHandle crac,
+                                         pypowsybl::JavaHandle rao, const pypowsybl::LoadFlowParameters& parameters,
+                                         std::string const& provider) {
+            return pypowsybl::runAngleMonitoring(network, result, crac, rao, parameters, provider);
+    }, "Run angle monitoring on a RAO result, returning an enriched result");
 }

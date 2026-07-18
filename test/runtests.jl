@@ -748,4 +748,18 @@ end
   @test size(RAO.get_flow_cnec_results(result), 2) >= 0
   @test size(RAO.get_range_action_results(result), 2) >= 0
   @test size(RAO.get_network_action_results(result), 2) >= 0
+
+  # Voltage monitoring enriches the result; it runs cleanly even though this PST-parade
+  # CRAC declares no voltage CNECs (so the voltage CNEC table is empty)
+  voltage_monitored = RAO.run_voltage_monitoring(rao, network, crac, result)
+  @test RAO.get_status(voltage_monitored) == RAO.DEFAULT
+  voltage_cnecs = RAO.get_voltage_cnec_results(voltage_monitored)
+  @test names(voltage_cnecs) == ["index", "cnec_id", "optimized_instant", "contingency",
+                                 "side", "min_voltage", "max_voltage", "margin"]
+
+  # Angle monitoring, driven with a monitoring GLSK
+  angle_monitored = RAO.run_angle_monitoring(rao, network, crac, result; monitoring_glsk = glsk)
+  @test RAO.get_status(angle_monitored) == RAO.DEFAULT
+  angle_cnecs = RAO.get_angle_cnec_results(angle_monitored)
+  @test names(angle_cnecs) == ["index", "cnec_id", "optimized_instant", "contingency", "angle", "margin"]
 end
