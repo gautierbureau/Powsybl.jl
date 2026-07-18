@@ -133,6 +133,37 @@ module LoadFlow
       return c_parameters_to_julia_struct(LibPowsybl.LoadFlowParameters())
   end
 
+  """
+      parameters_to_json(parameters::LoadFlowParameters) -> String
+
+  Serialize load flow parameters (including provider-specific parameters) to a
+  PowSyBl JSON string.
+  """
+  function parameters_to_json(parameters::LoadFlowParameters)
+      return String(LibPowsybl.load_flow_parameters_to_json(load_flow_parameters_to_c_struct(parameters)))
+  end
+
+  """
+      parameters_from_json(json::AbstractString) -> LoadFlowParameters
+
+  Deserialize load flow parameters from a PowSyBl JSON string, the inverse of
+  [`parameters_to_json`](@ref) for the common (non-provider) parameters.
+
+  Provider-specific parameters are carried inside the JSON `extensions` section:
+  they are preserved end-to-end through the JSON text (and honoured by the engine),
+  but PowSyBl does not surface parsed extension values back into the flat
+  `provider_parameters` dictionary, so that field is empty on the returned struct.
+  """
+  function parameters_from_json(json::AbstractString)
+      c_parameters = LibPowsybl.load_flow_parameters_from_json(String(json))
+      parameters = c_parameters_to_julia_struct(c_parameters)
+      keys_vec = LibPowsybl.provider_parameters_keys(c_parameters)
+      values_vec = LibPowsybl.provider_parameters_values(c_parameters)
+      parameters.provider_parameters = Dict{String, String}(
+          String(k) => String(v) for (k, v) in zip(keys_vec, values_vec))
+      return parameters
+  end
+
   function run_ac(network::Network.NetworkHandle, parameters::LoadFlowParameters, provider::String = "")
       load_flow_c_result = LibPowsybl.run_load_flow(network.handle, load_flow_parameters_to_c_struct(parameters), false, provider)
       return load_flow_results_to_dataframe(load_flow_c_result)
