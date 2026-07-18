@@ -108,3 +108,36 @@ end
   references = Powsybl.SensitivityAnalysis.get_reference_matrix(result)
   @test length(references) == length(branches)
 end
+
+@testset "Test sensitivity analysis zones" begin
+  SEN = Powsybl.SensitivityAnalysis
+  network = Powsybl.Network.create_ieee9()
+  generators = Powsybl.Network.get_generators(network)[:, "id"]
+  branches = ["L7-8-0", "L9-8-0", "L7-5-0"]
+
+  # Zones can be built from a vector (with explicit or defaulted keys) or a Dict
+  z1 = SEN.create_zone("zone1", [generators[1], generators[2]], [1.0, 2.0])
+  @test z1.id == "zone1"
+  @test z1.shift_keys_by_injection == Dict(generators[1] => 1.0, generators[2] => 2.0)
+
+  z_uniform = SEN.create_zone("z", [generators[1], generators[2]])
+  @test all(==(1.0), values(z_uniform.shift_keys_by_injection))
+
+  z2 = SEN.create_zone("zone2", Dict(generators[3] => 1.0))
+  @test z2.shift_keys_by_injection == Dict(generators[3] => 1.0)
+
+  @test_throws ArgumentError SEN.create_zone("bad", ["a", "b"], [1.0])
+
+  # Registered zone ids are usable as variable ids in a factor matrix
+  analysis = SEN.create()
+  SEN.set_zones(analysis, [z1, z2])
+  SEN.add_factor_matrix(analysis, branches, ["zone1", "zone2"])
+
+  result = SEN.run_dc(analysis, network)
+  sensitivities = SEN.get_sensitivity_matrix(result)
+  @test sensitivities isa Matrix{Float64}
+  # One row per zone (variable), one column per branch (function)
+  @test size(sensitivities) == (2, length(branches))
+  # A GLSK zone distributes the shift, so its sensitivities are finite numbers
+  @test all(isfinite, sensitivities)
+end
