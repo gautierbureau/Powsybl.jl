@@ -519,5 +519,202 @@ module Network
     return remove_extensions(network, extension_name, [id])
   end
 
+  # ===========================================================================
+  # Network modifications (topology builders)
+  # ===========================================================================
+
+  """
+  The kind of topology modification applied by [`create_network_modification`](@ref).
+  The ordinals match PowSyBl's `network_modification_type`.
+  """
+  @enum NetworkModificationType begin
+    VOLTAGE_LEVEL_TOPOLOGY_CREATION = 0
+    CREATE_COUPLING_DEVICE = 1
+    CREATE_FEEDER_BAY = 2
+    CREATE_LINE_FEEDER = 3
+    CREATE_TWO_WINDINGS_TRANSFORMER_FEEDER = 4
+    CREATE_LINE_ON_LINE = 5
+    REVERT_CREATE_LINE_ON_LINE = 6
+    CONNECT_VOLTAGE_LEVEL_ON_LINE = 7
+    REVERT_CONNECT_VOLTAGE_LEVEL_ON_LINE = 8
+    REPLACE_TEE_POINT_BY_VOLTAGE_LEVEL_ON_LINE = 9
+  end
+
+  """
+  The kind of element removed by [`remove_elements_modification`](@ref).
+  """
+  @enum RemoveModificationType begin
+    REMOVE_FEEDER = 0
+    REMOVE_VOLTAGE_LEVEL = 1
+    REMOVE_HVDC_LINE = 2
+  end
+
+  """
+      create_network_modification(network, modification_type; throw_exception = true, kwargs...)
+
+  Apply a topology modification of the given [`NetworkModificationType`](@ref). Each keyword
+  argument is a column of the modification's dataframe (scalar or vector); the columns are
+  coerced to the schema PowSyBl expects. This is the generic entry point behind the
+  `create_*` / `connect_*` / `replace_*` helpers below.
+  """
+  function create_network_modification(network::NetworkHandle, modification_type::NetworkModificationType;
+                                       throw_exception::Bool = true, kwargs...)
+    code = Int(modification_type)
+    builder = LibPowsybl.ElementDataframe()
+    _fill_builder!(builder, kwargs,
+                   LibPowsybl.get_modification_metadata_names(code),
+                   LibPowsybl.get_modification_metadata_types(code),
+                   LibPowsybl.get_modification_metadata_indices(code))
+    LibPowsybl.create_network_modification(network.handle, builder, code, throw_exception)
+    return nothing
+  end
+
+  """
+      create_voltage_level_topology(network; throw_exception = true, kwargs...)
+
+  Create the internal topology (busbar sections and coupling switches) of a voltage level.
+  Columns: `id`, `low_bus_or_busbar_index`, `aligned_buses_or_busbar_count`,
+  `low_section_index`, `section_count`, `bus_or_busbar_section_prefix_id`,
+  `switch_prefix_id`, `switch_kinds`.
+  """
+  function create_voltage_level_topology(network::NetworkHandle; throw_exception::Bool = true, kwargs...)
+    return create_network_modification(network, VOLTAGE_LEVEL_TOPOLOGY_CREATION; throw_exception, kwargs...)
+  end
+
+  """
+      create_coupling_device(network; throw_exception = true, kwargs...)
+
+  Create a coupling device (a closed switch chain) between two busbar sections or buses.
+  Columns: `bus_or_busbar_section_id_1`, `bus_or_busbar_section_id_2`, `switch_prefix_id`.
+  """
+  function create_coupling_device(network::NetworkHandle; throw_exception::Bool = true, kwargs...)
+    return create_network_modification(network, CREATE_COUPLING_DEVICE; throw_exception, kwargs...)
+  end
+
+  """
+      create_line_on_line(network; throw_exception = true, kwargs...)
+
+  Tap an existing line, splitting it in two and connecting a new line to a bus/busbar.
+  Columns include `line_id` (the line to split), `bbs_or_bus_id`, `new_line_id`,
+  `new_line_r`/`_x`/`_b1`/`_b2`/`_g1`/`_g2`, `line1_id`, `line2_id`, `position_percent`.
+  """
+  function create_line_on_line(network::NetworkHandle; throw_exception::Bool = true, kwargs...)
+    return create_network_modification(network, CREATE_LINE_ON_LINE; throw_exception, kwargs...)
+  end
+
+  """
+      revert_create_line_on_line(network; throw_exception = true, kwargs...)
+
+  Revert a [`create_line_on_line`](@ref), merging the two line segments back into one.
+  Columns: `line_to_be_merged1_id`, `line_to_be_merged2_id`, `line_to_be_deleted`,
+  `merged_line_id`, `merged_line_name`.
+  """
+  function revert_create_line_on_line(network::NetworkHandle; throw_exception::Bool = true, kwargs...)
+    return create_network_modification(network, REVERT_CREATE_LINE_ON_LINE; throw_exception, kwargs...)
+  end
+
+  """
+      connect_voltage_level_on_line(network; throw_exception = true, kwargs...)
+
+  Connect an existing voltage level onto a line by splitting it at `position_percent`.
+  Columns: `bbs_or_bus_id`, `line_id`, `position_percent`, `line1_id`, `line1_name`,
+  `line2_id`, `line2_name`.
+  """
+  function connect_voltage_level_on_line(network::NetworkHandle; throw_exception::Bool = true, kwargs...)
+    return create_network_modification(network, CONNECT_VOLTAGE_LEVEL_ON_LINE; throw_exception, kwargs...)
+  end
+
+  """
+      revert_connect_voltage_level_on_line(network; throw_exception = true, kwargs...)
+
+  Revert a [`connect_voltage_level_on_line`](@ref). Columns: `line1_id`, `line2_id`,
+  `line_id`, `line_name`.
+  """
+  function revert_connect_voltage_level_on_line(network::NetworkHandle; throw_exception::Bool = true, kwargs...)
+    return create_network_modification(network, REVERT_CONNECT_VOLTAGE_LEVEL_ON_LINE; throw_exception, kwargs...)
+  end
+
+  """
+      replace_tee_point_by_voltage_level_on_line(network; throw_exception = true, kwargs...)
+
+  Replace a tee point (three lines meeting) by connecting a voltage level on the line.
+  Columns: `tee_point_line1`, `tee_point_line2`, `tee_point_line_to_remove`,
+  `bbs_or_bus_id`, `new_line1_id`, `new_line2_id`, `new_line1_name`, `new_line2_name`.
+  """
+  function replace_tee_point_by_voltage_level_on_line(network::NetworkHandle; throw_exception::Bool = true, kwargs...)
+    return create_network_modification(network, REPLACE_TEE_POINT_BY_VOLTAGE_LEVEL_ON_LINE; throw_exception, kwargs...)
+  end
+
+  function _as_id_vector(ids)
+    return ids isa AbstractString ? [String(ids)] : String.(collect(ids))
+  end
+
+  """
+      remove_elements_modification(network, connectable_ids, removal_type; throw_exception = true)
+
+  Remove elements with a topology-aware modification. `removal_type` is a
+  [`RemoveModificationType`](@ref); `connectable_ids` is an id or a vector of ids. Prefer
+  the [`remove_feeder_bays`](@ref) / [`remove_voltage_levels`](@ref) / [`remove_hvdc_lines`](@ref)
+  helpers.
+  """
+  function remove_elements_modification(network::NetworkHandle, connectable_ids,
+                                        removal_type::RemoveModificationType; throw_exception::Bool = true)
+    LibPowsybl.remove_elements_modification(network.handle, StdVector{StdString}(_as_id_vector(connectable_ids)),
+                                            Int(removal_type), throw_exception)
+    return nothing
+  end
+
+  """
+      remove_feeder_bays(network, connectable_ids; throw_exception = true)
+
+  Remove the given feeders (injections or branches) together with their bay switches.
+  """
+  function remove_feeder_bays(network::NetworkHandle, connectable_ids; throw_exception::Bool = true)
+    return remove_elements_modification(network, connectable_ids, REMOVE_FEEDER; throw_exception)
+  end
+
+  """
+      remove_voltage_levels(network, voltage_level_ids; throw_exception = true)
+
+  Remove the given voltage levels and everything they contain.
+  """
+  function remove_voltage_levels(network::NetworkHandle, voltage_level_ids; throw_exception::Bool = true)
+    return remove_elements_modification(network, voltage_level_ids, REMOVE_VOLTAGE_LEVEL; throw_exception)
+  end
+
+  """
+      remove_hvdc_lines(network, hvdc_line_ids; throw_exception = true)
+
+  Remove the given HVDC lines and their converter stations.
+  """
+  function remove_hvdc_lines(network::NetworkHandle, hvdc_line_ids; throw_exception::Bool = true)
+    return remove_elements_modification(network, hvdc_line_ids, REMOVE_HVDC_LINE; throw_exception)
+  end
+
+  function _unused_order_positions(network::NetworkHandle, busbar_section_id::String, before_or_after::String)
+    positions = collect(Int, LibPowsybl.get_unused_connectable_order_positions(network.handle, busbar_section_id, before_or_after))
+    return isempty(positions) ? nothing : (positions[1], positions[end])
+  end
+
+  """
+      get_unused_order_positions_before(network, busbar_section_id) -> Union{Tuple{Int,Int}, Nothing}
+
+  Return the `(min, max)` interval of connectable order positions still free *before* the
+  given busbar section, or `nothing` if none are available.
+  """
+  function get_unused_order_positions_before(network::NetworkHandle, busbar_section_id::String)
+    return _unused_order_positions(network, busbar_section_id, "BEFORE")
+  end
+
+  """
+      get_unused_order_positions_after(network, busbar_section_id) -> Union{Tuple{Int,Int}, Nothing}
+
+  Return the `(min, max)` interval of connectable order positions still free *after* the
+  given busbar section, or `nothing` if none are available.
+  """
+  function get_unused_order_positions_after(network::NetworkHandle, busbar_section_id::String)
+    return _unused_order_positions(network, busbar_section_id, "AFTER")
+  end
+
   include("NetworkCreationUtils.jl")
 end
