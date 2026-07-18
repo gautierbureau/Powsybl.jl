@@ -697,4 +697,33 @@ end
   N.create_voltage_levels(empty_nb; id = "VL1", substation_id = "S1",
                           topology_kind = "NODE_BREAKER", nominal_v = 400.0)
   @test_throws Exception N.remove_internal_connections(empty_nb; voltage_level_id = "VL1", node1 = 0, node2 = 1)
+@testset "Test RAO (remedial action optimisation)" begin
+  RAO = Powsybl.RAO
+  network = Powsybl.Network.load("data/rao/rao_network.uct")
+
+  rao = RAO.create()
+  crac = RAO.load_crac(network, "data/rao/rao_crac.json")
+  glsk = RAO.load_glsk("data/rao/rao_glsk.xml")
+  # This CRAC enables loop-flow computation, which needs a GLSK
+  RAO.set_loopflow_glsk(rao, glsk)
+
+  result = RAO.run(rao, network, crac; parameters_file = "data/rao/rao_parameters.json")
+
+  # The optimisation succeeds
+  @test RAO.get_status(result) == RAO.DEFAULT
+
+  # A PST range action was optimised (this CRAC is a PST parade)
+  pst = RAO.get_pst_range_action_results(result)
+  @test "optimized_tap" in names(pst)
+  @test size(pst, 1) >= 1
+
+  # Cost results are reported per optimized instant, including the initial state
+  cost = RAO.get_cost_results(result)
+  @test names(cost) == ["optimized_instant", "functional_cost", "virtual_cost", "cost"]
+  @test "initial" in cost[:, "optimized_instant"]
+
+  # The other result accessors return tabular data without throwing
+  @test size(RAO.get_flow_cnec_results(result), 2) >= 0
+  @test size(RAO.get_range_action_results(result), 2) >= 0
+  @test size(RAO.get_network_action_results(result), 2) >= 0
 end

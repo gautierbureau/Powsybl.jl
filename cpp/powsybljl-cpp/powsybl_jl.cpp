@@ -1252,4 +1252,87 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
             dataframe df = builder.build_dataframe();
             pypowsybl::removeInternalConnections(network, &df);
     }, "Remove node-breaker internal connections described by a dataframe");
+  // ===========================================================================
+  // RAO (remedial action optimisation, OpenRAO)
+  // ===========================================================================
+
+  // RaoComputationStatus
+  mod.add_bits<RaoComputationStatus>("RaoComputationStatus", jlcxx::julia_type("CppEnum"));
+  mod.set_const("RAO_DEFAULT", RaoComputationStatus::DEFAULT);
+  mod.set_const("RAO_FAILURE", RaoComputationStatus::FAILURE);
+  mod.set_const("RAO_PARTIAL_FAILURE", RaoComputationStatus::PARTIAL_FAILURE);
+
+  mod.method("create_rao", [] () {
+            return pypowsybl::createRao();
+    }, "Create a RAO context");
+
+  // The CRAC / GLSK / parameters are imported from their file content (JSON or XML text),
+  // passed through the same buffered graal entry points pypowsybl feeds from Python buffers.
+  mod.method("load_crac_source", [] (pypowsybl::JavaHandle network, std::string const& cracSource) {
+            return pypowsybl::PowsyblCaller::get()->callJava<pypowsybl::JavaHandle>(
+                ::loadCracBufferedSource, network, (char*) cracSource.data(), (int) cracSource.size());
+    }, "Import a CRAC from its file content against a network");
+
+  mod.method("load_glsk_source", [] (std::string const& glskSource) {
+            return pypowsybl::PowsyblCaller::get()->callJava<pypowsybl::JavaHandle>(
+                ::loadGlskBufferedSource, (char*) glskSource.data(), (int) glskSource.size());
+    }, "Import a GLSK document from its file content");
+
+  mod.method("set_rao_loopflow_glsk", [] (pypowsybl::JavaHandle raoContext, pypowsybl::JavaHandle glsk) {
+            pypowsybl::setLoopFlowGlsk(raoContext, glsk);
+    }, "Set the loop flow GLSK of a RAO context");
+
+  mod.method("set_rao_monitoring_glsk", [] (pypowsybl::JavaHandle raoContext, pypowsybl::JavaHandle glsk) {
+            pypowsybl::setMonitoringGlsk(raoContext, glsk);
+    }, "Set the monitoring GLSK of a RAO context");
+
+  mod.method("run_rao", [] (pypowsybl::JavaHandle network, pypowsybl::JavaHandle crac, pypowsybl::JavaHandle rao,
+                            std::string const& provider) {
+            std::shared_ptr<pypowsybl::RaoParameters> parameters(pypowsybl::createRaoParameters());
+            return pypowsybl::runRaoWithParameters(network, crac, rao, *parameters, provider);
+    }, "Run a RAO with default parameters");
+
+  mod.method("run_rao_with_parameters", [] (pypowsybl::JavaHandle network, pypowsybl::JavaHandle crac, pypowsybl::JavaHandle rao,
+                                            std::string const& parametersSource, std::string const& provider) {
+            std::shared_ptr<rao_parameters> cParameters(pypowsybl::PowsyblCaller::get()->callJava<rao_parameters*>(
+                ::loadRaoParameters, (char*) parametersSource.data(), (int) parametersSource.size()));
+            pypowsybl::RaoParameters parameters(cParameters.get());
+            return pypowsybl::runRaoWithParameters(network, crac, rao, parameters, provider);
+    }, "Run a RAO with parameters loaded from a JSON parameters file content");
+
+  mod.method("get_rao_result_status", [] (pypowsybl::JavaHandle result) {
+            return pypowsybl::getRaoResultStatus(result);
+    }, "Get the global status of a RAO result");
+
+  mod.method("get_rao_flow_cnec_results", [] (pypowsybl::JavaHandle crac, pypowsybl::JavaHandle result) {
+            return pypowsybl::getFlowCnecResults(crac, result);
+    }, "Get the flow CNEC results of a RAO result");
+
+  mod.method("get_rao_angle_cnec_results", [] (pypowsybl::JavaHandle crac, pypowsybl::JavaHandle result) {
+            return pypowsybl::getAngleCnecResults(crac, result);
+    }, "Get the angle CNEC results of a RAO result");
+
+  mod.method("get_rao_voltage_cnec_results", [] (pypowsybl::JavaHandle crac, pypowsybl::JavaHandle result) {
+            return pypowsybl::getVoltageCnecResults(crac, result);
+    }, "Get the voltage CNEC results of a RAO result");
+
+  mod.method("get_rao_remedial_action_results", [] (pypowsybl::JavaHandle crac, pypowsybl::JavaHandle result) {
+            return pypowsybl::getRemedialActionResults(crac, result);
+    }, "Get the remedial action results of a RAO result");
+
+  mod.method("get_rao_network_action_results", [] (pypowsybl::JavaHandle crac, pypowsybl::JavaHandle result) {
+            return pypowsybl::getNetworkActionResults(crac, result);
+    }, "Get the network action results of a RAO result");
+
+  mod.method("get_rao_pst_range_action_results", [] (pypowsybl::JavaHandle crac, pypowsybl::JavaHandle result) {
+            return pypowsybl::getPstRangeActionResults(crac, result);
+    }, "Get the PST range action results of a RAO result");
+
+  mod.method("get_rao_range_action_results", [] (pypowsybl::JavaHandle crac, pypowsybl::JavaHandle result) {
+            return pypowsybl::getRangeActionResults(crac, result);
+    }, "Get the range action results of a RAO result");
+
+  mod.method("get_rao_cost_results", [] (pypowsybl::JavaHandle crac, pypowsybl::JavaHandle result) {
+            return pypowsybl::getCostResults(crac, result);
+    }, "Get the cost results of a RAO result");
 }
