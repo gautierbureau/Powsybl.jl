@@ -130,7 +130,7 @@ module LoadFlow
   end
 
   function load_flow_parameters()
-      return c_parameters_to_julia_struct(LibPowsybl.LoadFlowParameters())
+      return c_parameters_to_julia_struct(LibPowsybl.default_loadflow_parameters())
   end
 
   function run_ac(network::Network.NetworkHandle, parameters::LoadFlowParameters, provider::String = "")
