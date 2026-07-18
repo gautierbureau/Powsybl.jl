@@ -7,6 +7,7 @@
 module RAO
   using ..LibPowsybl
   using ..Network
+  using ..LoadFlow
   using CxxWrap
 
   """
@@ -115,6 +116,42 @@ module RAO
       LibPowsybl.run_rao_with_parameters(network.handle, crac.handle, rao.handle,
                                          String(read(parameters_file)), provider)
     return RaoResult(handle, crac.handle)
+  end
+
+  function _run_monitoring(run_fn, rao::RaoContext, network::Network.NetworkHandle, crac::Crac, result::RaoResult,
+                           parameters::LoadFlow.LoadFlowParameters, provider::String, monitoring_glsk::Union{Glsk, Nothing})
+    monitoring_glsk !== nothing && set_monitoring_glsk(rao, monitoring_glsk)
+    c_parameters = LoadFlow.load_flow_parameters_to_c_struct(parameters)
+    handle = run_fn(network.handle, result.handle, crac.handle, rao.handle, c_parameters, provider)
+    return RaoResult(handle, crac.handle)
+  end
+
+  """
+      run_voltage_monitoring(rao, network, crac, result; parameters = LoadFlow.load_flow_parameters(),
+                             provider = "", monitoring_glsk = nothing) -> RaoResult
+
+  Run voltage monitoring on a RAO `result`: a load flow re-evaluates the voltage CNECs and
+  the (possibly voltage-constrained) remedial actions, returning an enriched result whose
+  [`get_voltage_cnec_results`](@ref) reflects the monitoring. Pass a `monitoring_glsk` when
+  the monitoring needs one.
+  """
+  function run_voltage_monitoring(rao::RaoContext, network::Network.NetworkHandle, crac::Crac, result::RaoResult;
+                                  parameters::LoadFlow.LoadFlowParameters = LoadFlow.load_flow_parameters(),
+                                  provider::String = "", monitoring_glsk::Union{Glsk, Nothing} = nothing)
+    return _run_monitoring(LibPowsybl.run_voltage_monitoring, rao, network, crac, result, parameters, provider, monitoring_glsk)
+  end
+
+  """
+      run_angle_monitoring(rao, network, crac, result; parameters = LoadFlow.load_flow_parameters(),
+                           provider = "", monitoring_glsk = nothing) -> RaoResult
+
+  Run angle monitoring on a RAO `result`, returning an enriched result whose
+  [`get_angle_cnec_results`](@ref) reflects the monitoring. See [`run_voltage_monitoring`](@ref).
+  """
+  function run_angle_monitoring(rao::RaoContext, network::Network.NetworkHandle, crac::Crac, result::RaoResult;
+                                parameters::LoadFlow.LoadFlowParameters = LoadFlow.load_flow_parameters(),
+                                provider::String = "", monitoring_glsk::Union{Glsk, Nothing} = nothing)
+    return _run_monitoring(LibPowsybl.run_angle_monitoring, rao, network, crac, result, parameters, provider, monitoring_glsk)
   end
 
   """
