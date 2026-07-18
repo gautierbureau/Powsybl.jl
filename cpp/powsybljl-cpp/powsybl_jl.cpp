@@ -168,6 +168,28 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
       pypowsybl::saveNetwork(handle, file, format, parameters, nullptr);
     }, "Save network to a file in a given format");
 
+  // Network composition. merge takes a std::vector<JavaHandle>, which is not marshalled
+  // from Julia, so this wrapper builds the two-network vector on the C++ side and the
+  // Julia layer left-folds it to merge any number of networks.
+  mod.method("merge_networks", [] (pypowsybl::JavaHandle a, pypowsybl::JavaHandle b) {
+      std::vector<pypowsybl::JavaHandle> networks { a, b };
+      return pypowsybl::merge(networks);
+    }, "Merge two networks, returning the merged network");
+
+  mod.method("get_sub_network", [] (pypowsybl::JavaHandle network, std::string const& subNetworkId) {
+      return pypowsybl::getSubNetwork(network, subNetworkId);
+    }, "Get a sub-network of a network by its id");
+
+  mod.method("detach_sub_network", [] (pypowsybl::JavaHandle subNetwork) {
+      return pypowsybl::detachSubNetwork(subNetwork);
+    }, "Detach a sub-network into a standalone network");
+
+  mod.method("reduce_network", [] (pypowsybl::JavaHandle network, double vMin, double vMax,
+                                   std::vector<std::string> const& ids, std::vector<std::string> const& vls,
+                                   std::vector<int> const& depths, bool withDanglingLines) {
+      pypowsybl::reduceNetwork(network, vMin, vMax, ids, vls, depths, withDanglingLines);
+    }, "Reduce a network in place, keeping the elements matching the criteria");
+
   mod.add_type<series>("SeriesType")
         .method("name", [](series& s) { return std::string(s.name); })
         .method("index", [](series& s) { return (bool) s.index; })
