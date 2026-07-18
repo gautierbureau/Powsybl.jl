@@ -418,4 +418,29 @@ end
 
   Powsybl.Log.clear()
   @test isempty(Powsybl.Log.get_messages())
+@testset "Test network composition" begin
+  be = Powsybl.Network.create_micro_grid_be()
+  nl = Powsybl.Network.create_micro_grid_nl()
+  vl_be = size(Powsybl.Network.get_voltage_levels(be), 1)
+  vl_nl = size(Powsybl.Network.get_voltage_levels(nl), 1)
+
+  # Merge the two networks into one
+  merged = Powsybl.Network.merge([be, nl])
+  @test size(Powsybl.Network.get_voltage_levels(merged), 1) == vl_be + vl_nl
+
+  # The merged network has both as sub-networks
+  subs = Powsybl.Network.get_sub_networks(merged)
+  @test size(subs, 1) == 2
+
+  # Retrieve a sub-network and detach it into a standalone network
+  sub = Powsybl.Network.get_sub_network(merged, subs[1, "id"])
+  detached = Powsybl.Network.detach_sub_network(sub)
+  @test size(Powsybl.Network.get_voltage_levels(detached), 1) in (vl_be, vl_nl)
+
+  # Reduce a network in place, keeping only two voltage levels
+  network = Powsybl.Network.create_ieee9()
+  all_vls = Powsybl.Network.get_voltage_levels(network)[:, "id"]
+  kept = all_vls[1:2]
+  Powsybl.Network.reduce_by_ids(network, kept)
+  @test Set(Powsybl.Network.get_voltage_levels(network)[:, "id"]) == Set(kept)
 end

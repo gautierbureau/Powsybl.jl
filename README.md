@@ -275,6 +275,27 @@ true
 
 # Update an existing network in place from a file (importer-dependent; CGMES supports it)
 julia> Powsybl.Network.update_network(network, "updated_state.zip")
+### Network composition
+
+Networks can be merged, sliced into sub-networks, and reduced.
+
+```julia
+julia> be = Powsybl.Network.create_micro_grid_be()
+julia> nl = Powsybl.Network.create_micro_grid_nl()
+
+# Merge networks into one (each becomes a sub-network of the result)
+julia> merged = Powsybl.Network.merge([be, nl])
+julia> Powsybl.Network.get_sub_networks(merged)
+
+# Retrieve a sub-network and detach it into a standalone network
+julia> sub = Powsybl.Network.get_sub_network(merged, "urn:uuid:...")
+julia> standalone = Powsybl.Network.detach_sub_network(sub)
+
+# Reduce a network in place (mutating it)
+julia> network = Powsybl.Network.load("large_case.xiidm")
+julia> Powsybl.Network.reduce_by_voltage_range(network, 200.0, 400.0)
+julia> Powsybl.Network.reduce_by_ids(network, ["VL1", "VL2"])
+julia> Powsybl.Network.reduce_by_ids_and_depths(network, [("VL1", 1)])
 ```
 
 ### Network extensions
