@@ -1204,4 +1204,52 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
                                                            std::string beforeOrAfter) {
             return pypowsybl::getUnusedConnectableOrderPositions(network, busbarSectionId, beforeOrAfter);
     }, "Get the unused connectable order positions before or after a busbar section");
+
+  // Modification dataframe schema metadata for the feeder-bay family, which depends on the
+  // element type being created (a load, a generator, a line, ...). Returns one metadata set
+  // per dataframe the modification needs.
+  mod.method("get_modification_element_dataframes_count", [] (int modificationType, element_type elementType) {
+            return (int) pypowsybl::getModificationMetadataWithElementType(
+                static_cast<network_modification_type>(modificationType), elementType).size();
+    }, "Get the number of dataframes a feeder-bay modification needs for an element type");
+
+  mod.method("get_modification_element_metadata_names_at", [] (int modificationType, element_type elementType, int dataframeIndex) {
+            std::vector<std::string> result;
+            auto metadata = pypowsybl::getModificationMetadataWithElementType(
+                static_cast<network_modification_type>(modificationType), elementType);
+            if (dataframeIndex >= 0 && dataframeIndex < (int) metadata.size()) {
+                for (const auto& m : metadata[dataframeIndex]) { result.push_back(m.name()); }
+            }
+            return result;
+    }, "Get the series names of the i-th feeder-bay modification dataframe");
+
+  mod.method("get_modification_element_metadata_types_at", [] (int modificationType, element_type elementType, int dataframeIndex) {
+            std::vector<int> result;
+            auto metadata = pypowsybl::getModificationMetadataWithElementType(
+                static_cast<network_modification_type>(modificationType), elementType);
+            if (dataframeIndex >= 0 && dataframeIndex < (int) metadata.size()) {
+                for (const auto& m : metadata[dataframeIndex]) { result.push_back(m.type()); }
+            }
+            return result;
+    }, "Get the series types of the i-th feeder-bay modification dataframe");
+
+  mod.method("get_modification_element_metadata_indices_at", [] (int modificationType, element_type elementType, int dataframeIndex) {
+            std::vector<int> result;
+            auto metadata = pypowsybl::getModificationMetadataWithElementType(
+                static_cast<network_modification_type>(modificationType), elementType);
+            if (dataframeIndex >= 0 && dataframeIndex < (int) metadata.size()) {
+                for (const auto& m : metadata[dataframeIndex]) { result.push_back(m.isIndex() ? 1 : 0); }
+            }
+            return result;
+    }, "Get the index flags of the i-th feeder-bay modification dataframe");
+
+  mod.method("remove_aliases", [] (pypowsybl::JavaHandle network, ElementDataframe& builder) {
+            dataframe df = builder.build_dataframe();
+            pypowsybl::removeAliases(network, &df);
+    }, "Remove element aliases described by a dataframe (id, alias)");
+
+  mod.method("remove_internal_connections", [] (pypowsybl::JavaHandle network, ElementDataframe& builder) {
+            dataframe df = builder.build_dataframe();
+            pypowsybl::removeInternalConnections(network, &df);
+    }, "Remove node-breaker internal connections described by a dataframe");
 }

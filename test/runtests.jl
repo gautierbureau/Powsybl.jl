@@ -638,3 +638,63 @@ end
   N.remove_feeder_bays(eurostag2, "GEN")
   @test !("GEN" in N.get_generators(eurostag2)[:, "id"])
 end
+@testset "Test feeder bays and alias/internal-connection removal" begin
+  N = Powsybl.Network
+
+  # A helper node-breaker network with two voltage levels, each with one busbar section
+  function node_breaker_network()
+    network = N.create_empty()
+    N.create_substations(network; id = "S1", country = "FR")
+    N.create_voltage_levels(network; id = "VL1", substation_id = "S1",
+                            topology_kind = "NODE_BREAKER", nominal_v = 400.0)
+    N.create_voltage_levels(network; id = "VL2", substation_id = "S1",
+                            topology_kind = "NODE_BREAKER", nominal_v = 400.0)
+    N.create_voltage_level_topology(network; id = "VL1", aligned_buses_or_busbar_count = 1,
+                                    section_count = 1, switch_kinds = "")
+    N.create_voltage_level_topology(network; id = "VL2", aligned_buses_or_busbar_count = 1,
+                                    section_count = 1, switch_kinds = "")
+    return network, N.get_busbar_sections(network)[:, "id"]
+  end
+
+  # Injection feeder bays (create the element and its connection bay in one step)
+  network, busbars = node_breaker_network()
+  N.create_load_bay(network; id = "LOAD1", p0 = 100.0, q0 = 10.0,
+                    bus_or_busbar_section_id = busbars[1], position_order = 10, direction = "BOTTOM")
+  @test "LOAD1" in N.get_loads(network)[:, "id"]
+
+  N.create_generator_bay(network; id = "GEN1", max_p = 1000.0, min_p = 0.0, target_p = 100.0,
+                         target_v = 400.0, voltage_regulator_on = true,
+                         bus_or_busbar_section_id = busbars[1], position_order = 20, direction = "TOP")
+  @test "GEN1" in N.get_generators(network)[:, "id"]
+
+  # Line feeder bay (connects two node-breaker voltage levels)
+  network2, busbars2 = node_breaker_network()
+  N.create_line_bays(network2; id = "NEW_LINE", r = 1.0, x = 10.0, b1 = 0.0, b2 = 0.0, g1 = 0.0, g2 = 0.0,
+                     bus_or_busbar_section_id_1 = busbars2[1], bus_or_busbar_section_id_2 = busbars2[2],
+                     position_order_1 = 10, position_order_2 = 10)
+  @test "NEW_LINE" in N.get_lines(network2)[:, "id"]
+
+  # Two windings transformer feeder bay
+  network3, busbars3 = node_breaker_network()
+  N.create_2_windings_transformer_bays(network3; id = "NEW_TWT",
+                                       voltage_level1_id = "VL1", voltage_level2_id = "VL2",
+                                       r = 1.0, x = 10.0, g = 0.0, b = 0.0, rated_u1 = 400.0, rated_u2 = 400.0,
+                                       bus_or_busbar_section_id_1 = busbars3[1], bus_or_busbar_section_id_2 = busbars3[2],
+                                       position_order_1 = 10, position_order_2 = 10)
+  @test "NEW_TWT" in N.get_2_windings_transformers(network3)[:, "id"]
+
+  # Alias removal round-trip: add an alias, remove it, then the id is free to reuse
+  eurostag = N.create_eurostag_tutorial_example1()
+  N.create_elements(eurostag, Powsybl.LibPowsybl.ALIAS; id = "GEN", alias = "MY_ALIAS", alias_type = "")
+  N.remove_aliases(eurostag; id = "GEN", alias = "MY_ALIAS")
+  # Re-adding the same alias only succeeds because the previous one was removed
+  N.create_elements(eurostag, Powsybl.LibPowsybl.ALIAS; id = "GEN", alias = "MY_ALIAS", alias_type = "")
+  @test "GEN" in N.get_generators(eurostag)[:, "id"]
+
+  # Internal-connection removal reaches the engine: removing a nonexistent one is rejected
+  empty_nb = N.create_empty()
+  N.create_substations(empty_nb; id = "S1", country = "FR")
+  N.create_voltage_levels(empty_nb; id = "VL1", substation_id = "S1",
+                          topology_kind = "NODE_BREAKER", nominal_v = 400.0)
+  @test_throws Exception N.remove_internal_connections(empty_nb; voltage_level_id = "VL1", node1 = 0, node2 = 1)
+end

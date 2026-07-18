@@ -1132,5 +1132,111 @@ module Network
     return _unused_order_positions(network, busbar_section_id, "AFTER")
   end
 
+  # ---------------------------------------------------------------------------
+  # Feeder bays: create an element and connect it into a node-breaker voltage
+  # level in one step (creating the connection bay: switches, order position...).
+  # ---------------------------------------------------------------------------
+
+  # Build the modification dataframe from the element-type-specific schema. For the
+  # injection feeder bay (CREATE_FEEDER_BAY) the element type is carried in a
+  # `feeder_type` column, exactly as pypowsybl does.
+  function _create_feeder_bay(network::NetworkHandle, modification_type::NetworkModificationType,
+                              element_type::LibPowsybl.ElementType, feeder_type_name;
+                              throw_exception::Bool, kwargs...)
+    code = Int(modification_type)
+    provided = collect(kwargs)
+    if feeder_type_name !== nothing
+      push!(provided, :feeder_type => feeder_type_name)
+    end
+    builder = LibPowsybl.ElementDataframe()
+    _fill_builder!(builder, provided,
+                   LibPowsybl.get_modification_element_metadata_names_at(code, element_type, 0),
+                   LibPowsybl.get_modification_element_metadata_types_at(code, element_type, 0),
+                   LibPowsybl.get_modification_element_metadata_indices_at(code, element_type, 0))
+    LibPowsybl.create_network_modification(network.handle, builder, code, throw_exception)
+    return nothing
+  end
+
+  for (fname, etype, tname) in [
+        (:create_load_bay, :LOAD, "LOAD"),
+        (:create_generator_bay, :GENERATOR, "GENERATOR"),
+        (:create_battery_bay, :BATTERY, "BATTERY"),
+        (:create_dangling_line_bay, :DANGLING_LINE, "DANGLING_LINE"),
+        (:create_shunt_compensator_bay, :SHUNT_COMPENSATOR, "SHUNT_COMPENSATOR"),
+        (:create_static_var_compensator_bay, :STATIC_VAR_COMPENSATOR, "STATIC_VAR_COMPENSATOR"),
+        (:create_lcc_converter_station_bay, :LCC_CONVERTER_STATION, "LCC_CONVERTER_STATION"),
+        (:create_vsc_converter_station_bay, :VSC_CONVERTER_STATION, "VSC_CONVERTER_STATION"),
+      ]
+    @eval begin
+      """
+          $($(String(fname)))(network; throw_exception = true, kwargs...)
+
+      Create a $($tname) and connect it into a node-breaker voltage level, building its
+      connection bay. Keyword columns are the element's creation columns plus the bay
+      columns `bus_or_busbar_section_id`, `position_order` and `direction` (`"TOP"` or
+      `"BOTTOM"`).
+      """
+      function $(fname)(network::NetworkHandle; throw_exception::Bool = true, kwargs...)
+        return _create_feeder_bay(network, CREATE_FEEDER_BAY, LibPowsybl.$(etype), $tname;
+                                  throw_exception = throw_exception, kwargs...)
+      end
+    end
+  end
+
+  """
+      create_line_bays(network; throw_exception = true, kwargs...)
+
+  Create a line and connect both of its ends into node-breaker voltage levels, building a
+  bay on each side. Columns include the line's `id`, `r`, `x`, `b1`, `b2`, `g1`, `g2` and
+  the per-side bay columns `bus_or_busbar_section_id_1`/`_2`, `position_order_1`/`_2`,
+  `direction_1`/`_2`.
+  """
+  function create_line_bays(network::NetworkHandle; throw_exception::Bool = true, kwargs...)
+    return _create_feeder_bay(network, CREATE_LINE_FEEDER, LibPowsybl.LINE, nothing;
+                              throw_exception = throw_exception, kwargs...)
+  end
+
+  """
+      create_2_windings_transformer_bays(network; throw_exception = true, kwargs...)
+
+  Create a two windings transformer and connect both ends into node-breaker voltage levels.
+  Columns include `id`, `voltage_level1_id`, `voltage_level2_id`, `r`, `x`, `g`, `b`,
+  `rated_u1`, `rated_u2` and the per-side bay columns.
+  """
+  function create_2_windings_transformer_bays(network::NetworkHandle; throw_exception::Bool = true, kwargs...)
+    return _create_feeder_bay(network, CREATE_TWO_WINDINGS_TRANSFORMER_FEEDER, LibPowsybl.TWO_WINDINGS_TRANSFORMER, nothing;
+                              throw_exception = throw_exception, kwargs...)
+  end
+
+  # ---------------------------------------------------------------------------
+  # Alias and internal-connection removal
+  # ---------------------------------------------------------------------------
+
+  """
+      remove_aliases(network; id, alias)
+
+  Remove element aliases. `id` selects the elements and `alias` the alias to drop from each
+  (scalars or matching vectors).
+  """
+  function remove_aliases(network::NetworkHandle; kwargs...)
+    builder = LibPowsybl.ElementDataframe()
+    _fill_builder!(builder, kwargs, ["id", "alias"], [0, 0], [1, 0])
+    LibPowsybl.remove_aliases(network.handle, builder)
+    return nothing
+  end
+
+  """
+      remove_internal_connections(network; voltage_level_id, node1, node2)
+
+  Remove node-breaker internal connections (direct node-to-node links) identified by their
+  voltage level and the two node numbers they connect (scalars or matching vectors).
+  """
+  function remove_internal_connections(network::NetworkHandle; kwargs...)
+    builder = LibPowsybl.ElementDataframe()
+    _fill_builder!(builder, kwargs, ["voltage_level_id", "node1", "node2"], [0, 2, 2], [1, 0, 0])
+    LibPowsybl.remove_internal_connections(network.handle, builder)
+    return nothing
+  end
+
   include("NetworkCreationUtils.jl")
 end
