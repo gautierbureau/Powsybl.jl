@@ -20,6 +20,212 @@ module RAO
   end
 
   """
+  Objective the RAO optimises: `SECURE_FLOW`, `MAX_MIN_MARGIN`, `MAX_MIN_RELATIVE_MARGIN`
+  or `MIN_COST`.
+  """
+  @enum ObjectiveFunctionType begin
+    SECURE_FLOW = LibPowsybl.RAO_OBJ_SECURE_FLOW
+    MAX_MIN_MARGIN = LibPowsybl.RAO_OBJ_MAX_MIN_MARGIN
+    MAX_MIN_RELATIVE_MARGIN = LibPowsybl.RAO_OBJ_MAX_MIN_RELATIVE_MARGIN
+    MIN_COST = LibPowsybl.RAO_OBJ_MIN_COST
+  end
+
+  """
+  Unit the objective function is expressed in.
+  """
+  @enum Unit begin
+    AMPERE = LibPowsybl.RAO_UNIT_AMPERE
+    DEGREE = LibPowsybl.RAO_UNIT_DEGREE
+    MEGAWATT = LibPowsybl.RAO_UNIT_MEGAWATT
+    KILOVOLT = LibPowsybl.RAO_UNIT_KILOVOLT
+    PERCENT_IMAX = LibPowsybl.RAO_UNIT_PERCENT_IMAX
+    TAP = LibPowsybl.RAO_UNIT_TAP
+    SECTION_COUNT = LibPowsybl.RAO_UNIT_SECTION_COUNT
+  end
+
+  """
+  MILP solver used for range action optimisation.
+  """
+  @enum Solver begin
+    CBC = LibPowsybl.RAO_SOLVER_CBC
+    SCIP = LibPowsybl.RAO_SOLVER_SCIP
+    XPRESS = LibPowsybl.RAO_SOLVER_XPRESS
+  end
+
+  """
+  How PSTs are modelled in the MILP: `CONTINUOUS` or `APPROXIMATED_INTEGERS`.
+  """
+  @enum PstModel begin
+    CONTINUOUS = LibPowsybl.RAO_PST_CONTINUOUS
+    APPROXIMATED_INTEGERS = LibPowsybl.RAO_PST_APPROXIMATED_INTEGERS
+  end
+
+  """
+  Range action range shrinking policy.
+  """
+  @enum RaRangeShrinking begin
+    RA_RANGE_SHRINKING_DISABLED = LibPowsybl.RAO_RA_SHRINK_DISABLED
+    RA_RANGE_SHRINKING_ENABLED = LibPowsybl.RAO_RA_SHRINK_ENABLED
+    RA_RANGE_SHRINKING_ENABLED_IN_FIRST_PRAO_AND_CRAO = LibPowsybl.RAO_RA_SHRINK_ENABLED_IN_FIRST_PRAO_AND_CRAO
+  end
+
+  """
+  Condition under which a second preventive RAO is run.
+  """
+  @enum ExecutionCondition begin
+    EXECUTION_CONDITION_DISABLED = LibPowsybl.RAO_EXEC_DISABLED
+    POSSIBLE_CURATIVE_IMPROVEMENT = LibPowsybl.RAO_EXEC_POSSIBLE_CURATIVE_IMPROVEMENT
+    COST_INCREASE = LibPowsybl.RAO_EXEC_COST_INCREASE
+  end
+
+  """
+  Editable RAO parameters. Build defaults with [`rao_parameters`](@ref), edit the fields,
+  and pass to [`run`](@ref). The complex predefined range-action combinations and the
+  nested sensitivity analysis parameters are kept at their defaults.
+  """
+  mutable struct RaoParameters
+    objective_function_type::ObjectiveFunctionType
+    unit::Unit
+    enforce_curative_security::Bool
+    curative_min_obj_improvement::Float64
+    solver::Solver
+    relative_mip_gap::Float64
+    solver_specific_parameters::String
+    pst_ra_min_impact_threshold::Float64
+    hvdc_ra_min_impact_threshold::Float64
+    injection_ra_min_impact_threshold::Float64
+    max_mip_iterations::Int
+    pst_sensitivity_threshold::Float64
+    hvdc_sensitivity_threshold::Float64
+    injection_ra_sensitivity_threshold::Float64
+    pst_model::PstModel
+    ra_range_shrinking::RaRangeShrinking
+    max_preventive_search_tree_depth::Int
+    max_curative_search_tree_depth::Int
+    relative_min_impact_threshold::Float64
+    absolute_min_impact_threshold::Float64
+    skip_actions_far_from_most_limiting_element::Bool
+    max_number_of_boundaries_for_skipping_actions::Int
+    available_cpus::Int
+    execution_condition::ExecutionCondition
+    hint_from_first_preventive_rao::Bool
+    do_not_optimize_curative_cnecs_for_tsos_without_cras::Bool
+    load_flow_provider::String
+    sensitivity_provider::String
+    sensitivity_failure_overcost::Float64
+    provider_parameters::Dict{String, String}
+  end
+
+  function _c_to_rao_parameters(c)
+    keys_vec = LibPowsybl.provider_parameters_keys(c)
+    values_vec = LibPowsybl.provider_parameters_values(c)
+    return RaoParameters(
+      ObjectiveFunctionType(LibPowsybl.objective_function_type(c)),
+      Unit(LibPowsybl.unit(c)),
+      LibPowsybl.enforce_curative_security(c),
+      LibPowsybl.curative_min_obj_improvement(c),
+      Solver(LibPowsybl.solver(c)),
+      LibPowsybl.relative_mip_gap(c),
+      String(LibPowsybl.solver_specific_parameters(c)),
+      LibPowsybl.pst_ra_min_impact_threshold(c),
+      LibPowsybl.hvdc_ra_min_impact_threshold(c),
+      LibPowsybl.injection_ra_min_impact_threshold(c),
+      Int(LibPowsybl.max_mip_iterations(c)),
+      LibPowsybl.pst_sensitivity_threshold(c),
+      LibPowsybl.hvdc_sensitivity_threshold(c),
+      LibPowsybl.injection_ra_sensitivity_threshold(c),
+      PstModel(LibPowsybl.pst_model(c)),
+      RaRangeShrinking(LibPowsybl.ra_range_shrinking(c)),
+      Int(LibPowsybl.max_preventive_search_tree_depth(c)),
+      Int(LibPowsybl.max_curative_search_tree_depth(c)),
+      LibPowsybl.relative_min_impact_threshold(c),
+      LibPowsybl.absolute_min_impact_threshold(c),
+      LibPowsybl.skip_actions_far_from_most_limiting_element(c),
+      Int(LibPowsybl.max_number_of_boundaries_for_skipping_actions(c)),
+      Int(LibPowsybl.available_cpus(c)),
+      ExecutionCondition(LibPowsybl.execution_condition(c)),
+      LibPowsybl.hint_from_first_preventive_rao(c),
+      LibPowsybl.do_not_optimize_curative_cnecs_for_tsos_without_cras(c),
+      String(LibPowsybl.load_flow_provider(c)),
+      String(LibPowsybl.sensitivity_provider(c)),
+      LibPowsybl.sensitivity_failure_overcost(c),
+      Dict{String, String}(String(k) => String(v) for (k, v) in zip(keys_vec, values_vec)))
+  end
+
+  function _rao_parameters_to_c_struct(p::RaoParameters)
+    c = LibPowsybl.RaoParameters()
+    LibPowsybl.objective_function_type(c, LibPowsybl.RaoObjectiveFunctionType(p.objective_function_type))
+    LibPowsybl.unit(c, LibPowsybl.RaoUnit(p.unit))
+    LibPowsybl.enforce_curative_security(c, p.enforce_curative_security)
+    LibPowsybl.curative_min_obj_improvement(c, p.curative_min_obj_improvement)
+    LibPowsybl.solver(c, LibPowsybl.RaoSolver(p.solver))
+    LibPowsybl.relative_mip_gap(c, p.relative_mip_gap)
+    LibPowsybl.solver_specific_parameters(c, p.solver_specific_parameters)
+    LibPowsybl.pst_ra_min_impact_threshold(c, p.pst_ra_min_impact_threshold)
+    LibPowsybl.hvdc_ra_min_impact_threshold(c, p.hvdc_ra_min_impact_threshold)
+    LibPowsybl.injection_ra_min_impact_threshold(c, p.injection_ra_min_impact_threshold)
+    LibPowsybl.max_mip_iterations(c, Cint(p.max_mip_iterations))
+    LibPowsybl.pst_sensitivity_threshold(c, p.pst_sensitivity_threshold)
+    LibPowsybl.hvdc_sensitivity_threshold(c, p.hvdc_sensitivity_threshold)
+    LibPowsybl.injection_ra_sensitivity_threshold(c, p.injection_ra_sensitivity_threshold)
+    LibPowsybl.pst_model(c, LibPowsybl.RaoPstModel(p.pst_model))
+    LibPowsybl.ra_range_shrinking(c, LibPowsybl.RaRangeShrinking(p.ra_range_shrinking))
+    LibPowsybl.max_preventive_search_tree_depth(c, Cint(p.max_preventive_search_tree_depth))
+    LibPowsybl.max_curative_search_tree_depth(c, Cint(p.max_curative_search_tree_depth))
+    LibPowsybl.relative_min_impact_threshold(c, p.relative_min_impact_threshold)
+    LibPowsybl.absolute_min_impact_threshold(c, p.absolute_min_impact_threshold)
+    LibPowsybl.skip_actions_far_from_most_limiting_element(c, p.skip_actions_far_from_most_limiting_element)
+    LibPowsybl.max_number_of_boundaries_for_skipping_actions(c, Cint(p.max_number_of_boundaries_for_skipping_actions))
+    LibPowsybl.available_cpus(c, Cint(p.available_cpus))
+    LibPowsybl.execution_condition(c, LibPowsybl.RaoExecutionCondition(p.execution_condition))
+    LibPowsybl.hint_from_first_preventive_rao(c, p.hint_from_first_preventive_rao)
+    LibPowsybl.do_not_optimize_curative_cnecs_for_tsos_without_cras(c, p.do_not_optimize_curative_cnecs_for_tsos_without_cras)
+    LibPowsybl.load_flow_provider(c, p.load_flow_provider)
+    LibPowsybl.sensitivity_provider(c, p.sensitivity_provider)
+    LibPowsybl.sensitivity_failure_overcost(c, p.sensitivity_failure_overcost)
+    LibPowsybl.provider_parameters_keys(c, StdVector{StdString}(collect(keys(p.provider_parameters))))
+    LibPowsybl.provider_parameters_values(c, StdVector{StdString}(collect(values(p.provider_parameters))))
+    return c
+  end
+
+  """
+      rao_parameters() -> RaoParameters
+
+  Return a fresh set of default RAO parameters, ready to be edited and passed to
+  [`run`](@ref).
+  """
+  function rao_parameters()
+    return _c_to_rao_parameters(LibPowsybl.RaoParameters())
+  end
+
+  """
+      parameters_to_json(parameters::RaoParameters) -> String
+
+  Serialize RAO parameters to a PowSyBl JSON string.
+  """
+  function parameters_to_json(parameters::RaoParameters)
+    return String(LibPowsybl.rao_parameters_to_json(_rao_parameters_to_c_struct(parameters)))
+  end
+
+  """
+      parameters_from_json(json::AbstractString) -> RaoParameters
+
+  Deserialize RAO parameters from a PowSyBl JSON string into an editable struct.
+  """
+  function parameters_from_json(json::AbstractString)
+    return _c_to_rao_parameters(LibPowsybl.rao_parameters_from_json(String(json)))
+  end
+
+  """
+      load_parameters(parameters_file) -> RaoParameters
+
+  Load RAO parameters from a JSON file into an editable struct.
+  """
+  function load_parameters(parameters_file::AbstractString)
+    return parameters_from_json(String(read(parameters_file)))
+  end
+
+  """
   A RAO context, created with [`create`](@ref) and run against a network and a CRAC.
   """
   mutable struct RaoContext
@@ -101,19 +307,29 @@ module RAO
   end
 
   """
-      run(rao, network, crac; parameters_file = nothing, provider = "SearchTreeRao") -> RaoResult
+      run(rao, network, crac; parameters = nothing, parameters_file = nothing,
+          provider = "SearchTreeRao") -> RaoResult
 
-  Run the remedial action optimisation. With `parameters_file` (a JSON RAO parameters file)
-  the given parameters are used, otherwise the provider defaults apply. `provider` selects
-  the RAO implementation (e.g. `"SearchTreeRao"` or `"FastRao"`).
+  Run the remedial action optimisation. Provide either a [`RaoParameters`](@ref) struct
+  (`parameters`) or a JSON RAO parameters file (`parameters_file`); with neither, the
+  provider defaults apply. `provider` selects the RAO implementation (e.g. `"SearchTreeRao"`
+  or `"FastRao"`).
   """
   function run(rao::RaoContext, network::Network.NetworkHandle, crac::Crac;
+               parameters::Union{RaoParameters, Nothing} = nothing,
                parameters_file::Union{AbstractString, Nothing} = nothing,
                provider::String = "SearchTreeRao")
-    handle = parameters_file === nothing ?
-      LibPowsybl.run_rao(network.handle, crac.handle, rao.handle, provider) :
+    parameters !== nothing && parameters_file !== nothing &&
+      throw(ArgumentError("pass either `parameters` or `parameters_file`, not both"))
+    handle = if parameters !== nothing
+      LibPowsybl.run_rao_with_parameters_object(network.handle, crac.handle, rao.handle,
+                                                _rao_parameters_to_c_struct(parameters), provider)
+    elseif parameters_file !== nothing
       LibPowsybl.run_rao_with_parameters(network.handle, crac.handle, rao.handle,
                                          String(read(parameters_file)), provider)
+    else
+      LibPowsybl.run_rao(network.handle, crac.handle, rao.handle, provider)
+    end
     return RaoResult(handle, crac.handle)
   end
 

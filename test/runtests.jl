@@ -707,7 +707,29 @@ end
   # This CRAC enables loop-flow computation, which needs a GLSK
   RAO.set_loopflow_glsk(rao, glsk)
 
-  result = RAO.run(rao, network, crac; parameters_file = "data/rao/rao_parameters.json")
+  # Default parameters expose editable, typed fields
+  defaults = RAO.rao_parameters()
+  @test defaults.objective_function_type == RAO.SECURE_FLOW
+  @test defaults.unit == RAO.MEGAWATT
+  @test defaults.solver == RAO.CBC
+  @test defaults.load_flow_provider == "OpenLoadFlow"
+
+  # Parameters round-trip through JSON, preserving edited fields
+  edited = RAO.rao_parameters()
+  edited.objective_function_type = RAO.MAX_MIN_MARGIN
+  edited.max_mip_iterations = 5
+  edited.pst_model = RAO.APPROXIMATED_INTEGERS
+  json = RAO.parameters_to_json(edited)
+  @test occursin("MAX_MIN_MARGIN", json)
+  restored = RAO.parameters_from_json(json)
+  @test restored.objective_function_type == RAO.MAX_MIN_MARGIN
+  @test restored.max_mip_iterations == 5
+  @test restored.pst_model == RAO.APPROXIMATED_INTEGERS
+
+  # Load parameters into an editable struct and run the RAO with it
+  parameters = RAO.load_parameters("data/rao/rao_parameters.json")
+  @test parameters.objective_function_type == RAO.MAX_MIN_MARGIN
+  result = RAO.run(rao, network, crac; parameters = parameters)
 
   # The optimisation succeeds
   @test RAO.get_status(result) == RAO.DEFAULT
