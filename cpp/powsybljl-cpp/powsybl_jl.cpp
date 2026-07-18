@@ -1119,4 +1119,12 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
   mod.method("security_analysis_result_to_json", [] (pypowsybl::JavaHandle result, std::string const& jsonFilePath) {
             pypowsybl::exportToJson(result, jsonFilePath);
     }, "Export a security analysis result to a JSON file");
+  mod.method("load_flow_parameters_to_json", [] (const pypowsybl::LoadFlowParameters& parameters) {
+            return pypowsybl::writeLoadFlowParametersToJson(parameters);
+    }, "Serialize load flow parameters to a JSON string");
+
+  mod.method("load_flow_parameters_from_json", [] (const std::string& parametersJson) {
+            std::unique_ptr<pypowsybl::LoadFlowParameters> parameters(pypowsybl::createLoadFlowParametersFromJson(parametersJson));
+            return *parameters;
+    }, "Deserialize load flow parameters from a JSON string");
 }
