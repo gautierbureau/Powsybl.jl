@@ -1151,4 +1151,57 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
             std::unique_ptr<pypowsybl::LoadFlowParameters> parameters(pypowsybl::createLoadFlowParametersFromJson(parametersJson));
             return *parameters;
     }, "Deserialize load flow parameters from a JSON string");
+
+  // ===========================================================================
+  // Network modifications (topology builders)
+  // ===========================================================================
+
+  // Modification dataframe schema metadata (parallel arrays: names, types, index flags),
+  // keyed by the network_modification_type ordinal. Same type codes as element metadata.
+  mod.method("get_modification_metadata_names", [] (int modificationType) {
+            std::vector<std::string> result;
+            for (const auto& m : pypowsybl::getModificationMetadata(static_cast<network_modification_type>(modificationType))) {
+                result.push_back(m.name());
+            }
+            return result;
+    }, "Get the series names of a network modification dataframe");
+
+  mod.method("get_modification_metadata_types", [] (int modificationType) {
+            std::vector<int> result;
+            for (const auto& m : pypowsybl::getModificationMetadata(static_cast<network_modification_type>(modificationType))) {
+                result.push_back(m.type());
+            }
+            return result;
+    }, "Get the series types of a network modification dataframe");
+
+  mod.method("get_modification_metadata_indices", [] (int modificationType) {
+            std::vector<int> result;
+            for (const auto& m : pypowsybl::getModificationMetadata(static_cast<network_modification_type>(modificationType))) {
+                result.push_back(m.isIndex() ? 1 : 0);
+            }
+            return result;
+    }, "Get the index flags of a network modification dataframe");
+
+  mod.method("create_network_modification", [] (pypowsybl::JavaHandle network, ElementDataframe& builder,
+                                                int modificationType, bool throwException) {
+            std::vector<dataframe> dfs = builder.build_dataframes();
+            dataframe_array dataframes;
+            dataframes.dataframes = dfs.data();
+            dataframes.dataframes_count = (int) dfs.size();
+            pypowsybl::createNetworkModification(network, &dataframes,
+                                                 static_cast<network_modification_type>(modificationType),
+                                                 throwException, nullptr);
+    }, "Apply a network modification described by a dataframe builder");
+
+  mod.method("remove_elements_modification", [] (pypowsybl::JavaHandle network, std::vector<std::string> const& connectableIds,
+                                                 int removeModificationType, bool throwException) {
+            pypowsybl::removeElementsModification(network, connectableIds, nullptr,
+                                                  static_cast<remove_modification_type>(removeModificationType),
+                                                  throwException, nullptr);
+    }, "Remove elements (feeder bays, voltage levels or HVDC lines) with the given ids");
+
+  mod.method("get_unused_connectable_order_positions", [] (pypowsybl::JavaHandle network, std::string busbarSectionId,
+                                                           std::string beforeOrAfter) {
+            return pypowsybl::getUnusedConnectableOrderPositions(network, busbarSectionId, beforeOrAfter);
+    }, "Get the unused connectable order positions before or after a busbar section");
 }

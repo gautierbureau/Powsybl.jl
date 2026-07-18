@@ -593,3 +593,48 @@ end
   # A GLSK zone distributes the shift, so its sensitivities are finite numbers
   @test all(isfinite, sensitivities)
 end
+
+@testset "Test network modifications" begin
+  N = Powsybl.Network
+
+  # Build a node-breaker voltage level and create its topology (two busbar sections)
+  network = N.create_empty()
+  N.create_substations(network; id = "S1", country = "FR")
+  N.create_voltage_levels(network; id = "VL1", substation_id = "S1",
+                          topology_kind = "NODE_BREAKER", nominal_v = 400.0)
+  N.create_voltage_level_topology(network; id = "VL1",
+                                  aligned_buses_or_busbar_count = 2, section_count = 1, switch_kinds = "")
+  busbars = N.get_busbar_sections(network)[:, "id"]
+  @test length(busbars) == 2
+
+  # Couple the two busbar sections; a coupling device adds switches
+  switches_before = size(N.get_switches(network), 1)
+  N.create_coupling_device(network;
+                           bus_or_busbar_section_id_1 = busbars[1],
+                           bus_or_busbar_section_id_2 = busbars[2], switch_prefix_id = "cpl")
+  @test size(N.get_switches(network), 1) > switches_before
+
+  # Unused connectable order positions around a busbar section
+  interval = N.get_unused_order_positions_after(network, busbars[1])
+  @test interval === nothing || (interval isa Tuple{Int, Int} && interval[1] <= interval[2])
+
+  # Tap an existing line with a new line (create line on line)
+  eurostag = N.create_eurostag_tutorial_example1()
+  target_bus = N.get_bus_breaker_view_buses(eurostag)[1, "id"]
+  N.create_line_on_line(eurostag;
+                        bbs_or_bus_id = target_bus, new_line_id = "NEW_LINE",
+                        new_line_r = 1.0, new_line_x = 1.0,
+                        new_line_b1 = 0.0, new_line_b2 = 0.0, new_line_g1 = 0.0, new_line_g2 = 0.0,
+                        line_id = "NHV1_NHV2_1", line1_id = "L1_PART1", line2_id = "L1_PART2",
+                        position_percent = 50.0)
+  lines_after = N.get_lines(eurostag)[:, "id"]
+  @test "NEW_LINE" in lines_after
+  @test "L1_PART1" in lines_after && "L1_PART2" in lines_after
+  @test !("NHV1_NHV2_1" in lines_after)   # the tapped line was split
+
+  # Remove a feeder bay (a generator and its bay)
+  eurostag2 = N.create_eurostag_tutorial_example1()
+  @test "GEN" in N.get_generators(eurostag2)[:, "id"]
+  N.remove_feeder_bays(eurostag2, "GEN")
+  @test !("GEN" in N.get_generators(eurostag2)[:, "id"])
+end
