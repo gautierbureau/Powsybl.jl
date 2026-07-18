@@ -86,3 +86,33 @@ end
   result = Powsybl.LoadFlow.run_dc(network, parameters)
   @test size(result.component_results, 1) == 1
 end
+
+@testset "Test load flow parameters JSON round-trip" begin
+  LF = Powsybl.LoadFlow
+  parameters = LF.load_flow_parameters()
+  parameters.distributed_slack = false
+  parameters.dc_power_factor = 0.95
+  parameters.voltage_init_mode = LF.DC_VALUES
+  parameters.balance_type = LF.PROPORTIONAL_TO_LOAD
+  parameters.countries_to_balance = ["FR", "BE"]
+  parameters.provider_parameters = Dict("maxNewtonRaphsonIterations" => "20")
+
+  json = LF.parameters_to_json(parameters)
+  @test occursin("balanceType", json)
+  # Provider-specific parameters are serialized into the JSON extensions section
+  @test occursin("maxNewtonRaphsonIterations", json)
+
+  # The common parameters round-trip exactly
+  restored = LF.parameters_from_json(json)
+  @test restored.distributed_slack == false
+  @test restored.dc_power_factor == 0.95
+  @test restored.voltage_init_mode == LF.DC_VALUES
+  @test restored.balance_type == LF.PROPORTIONAL_TO_LOAD
+  @test restored.countries_to_balance == ["FR", "BE"]
+
+  # A default set of parameters is serializable and re-parses to the same defaults
+  defaults = LF.load_flow_parameters()
+  reparsed = LF.parameters_from_json(LF.parameters_to_json(defaults))
+  @test reparsed.use_reactive_limits == defaults.use_reactive_limits
+  @test reparsed.balance_type == defaults.balance_type
+end
