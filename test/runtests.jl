@@ -229,3 +229,25 @@ end
   N.remove_feeder_bays(eurostag2, "GEN")
   @test !("GEN" in N.get_generators(eurostag2)[:, "id"])
 end
+
+@testset "Test sensitivity analysis provider names" begin
+  @test !isempty(Powsybl.SensitivityAnalysis.get_provider_names())
+end
+
+@testset "Test sensitivity analysis" begin
+  network = Powsybl.Network.create_ieee9()
+  generators = Powsybl.Network.get_generators(network)[:, "id"]
+  branches = ["L7-8-0", "L9-8-0", "L7-5-0"]
+
+  analysis = Powsybl.SensitivityAnalysis.create()
+  Powsybl.SensitivityAnalysis.set_branch_flow_factor_matrix(analysis, branches, generators)
+
+  result = Powsybl.SensitivityAnalysis.run_dc(analysis, network)
+
+  sensitivities = Powsybl.SensitivityAnalysis.get_sensitivity_matrix(result)
+  @test sensitivities isa Matrix{Float64}
+  @test length(sensitivities) == length(branches) * length(generators)
+
+  references = Powsybl.SensitivityAnalysis.get_reference_matrix(result)
+  @test length(references) == length(branches)
+end
