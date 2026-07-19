@@ -72,3 +72,30 @@ end
   @test penalized.optimized_tap == 0
   @test penalized.min_margin ≈ penalized.initial_min_margin atol = 1e-6
 end
+
+@testset "N-1 post-contingency CNECs" begin
+  network = Powsybl.Network.load(joinpath(DATA, "rao_network.uct"))
+  crac = RAO.load_crac(network, joinpath(DATA, "N-1_case_crac_curative.json"))
+
+  result = PowsyblRao.solve_preventive(network, crac)
+
+  # This CRAC monitors 3 CNECs across states (preventive / outage / curative)
+  @test length(result.cnec_margins) == 3
+
+  # The CNECs are overloaded, so the minimum margin is negative; optimizing improves it
+  @test result.initial_min_margin < 0
+  @test result.min_margin > result.initial_min_margin
+
+  # The binding CNEC is a post-contingency one — N-1 is what drives the decision here
+  @test occursin("Contingency", result.binding_cnec)
+
+  # Reported minimum margin is self-consistent with the per-CNEC margins
+  @test result.min_margin ≈ minimum(values(result.cnec_margins)) atol = 1e-6
+
+  # Same tap decision as OpenRAO (which runs AC + a search tree on this case)
+  rao = RAO.create()
+  openrao = RAO.run(rao, network, crac; parameters_file = joinpath(DATA, "rao_parameters_with_curative.json"))
+  @test RAO.get_status(openrao) == RAO.DEFAULT
+  open_pst = RAO.get_pst_range_action_results(openrao)
+  @test result.optimized_tap == open_pst[1, "optimized_tap"]
+end
