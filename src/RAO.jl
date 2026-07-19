@@ -81,8 +81,8 @@ module RAO
 
   """
   Editable RAO parameters. Build defaults with [`rao_parameters`](@ref), edit the fields,
-  and pass to [`run`](@ref). The complex predefined range-action combinations and the
-  nested sensitivity analysis parameters are kept at their defaults.
+  and pass to [`run`](@ref). The nested sensitivity analysis parameters are kept at their
+  defaults (edit them through a dedicated JSON parameters file if needed).
   """
   mutable struct RaoParameters
     objective_function_type::ObjectiveFunctionType
@@ -114,6 +114,7 @@ module RAO
     load_flow_provider::String
     sensitivity_provider::String
     sensitivity_failure_overcost::Float64
+    predefined_combinations::Vector{Vector{String}}
     provider_parameters::Dict{String, String}
   end
 
@@ -150,6 +151,7 @@ module RAO
       String(LibPowsybl.load_flow_provider(c)),
       String(LibPowsybl.sensitivity_provider(c)),
       LibPowsybl.sensitivity_failure_overcost(c),
+      Vector{String}[collect(String, split(String(group), '\t')) for group in LibPowsybl.predefined_combinations(c)],
       Dict{String, String}(String(k) => String(v) for (k, v) in zip(keys_vec, values_vec)))
   end
 
@@ -184,6 +186,7 @@ module RAO
     LibPowsybl.load_flow_provider(c, p.load_flow_provider)
     LibPowsybl.sensitivity_provider(c, p.sensitivity_provider)
     LibPowsybl.sensitivity_failure_overcost(c, p.sensitivity_failure_overcost)
+    LibPowsybl.predefined_combinations(c, StdVector{StdString}([join(combo, '\t') for combo in p.predefined_combinations]))
     LibPowsybl.provider_parameters_keys(c, StdVector{StdString}(collect(keys(p.provider_parameters))))
     LibPowsybl.provider_parameters_values(c, StdVector{StdString}(collect(values(p.provider_parameters))))
     return c
