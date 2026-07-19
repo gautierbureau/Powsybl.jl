@@ -436,6 +436,40 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
     .method_readwrite("provider_parameters_keys", &pypowsybl::RaoParameters::provider_parameters_keys)
     .method_readwrite("provider_parameters_values", &pypowsybl::RaoParameters::provider_parameters_values);
 
+  // Predefined topological remedial-action combinations to try during the search tree.
+  // CxxWrap has no factory for the nested std::vector<std::vector<std::string>>, so we
+  // marshal it as a flat list where each combination is a single tab-joined string. The
+  // Julia side (RAO.jl) hides this behind a clean Vector{Vector{String}} field.
+  raoParametersMapper.jlcxx_wrapper()
+    .method("predefined_combinations", [] (const pypowsybl::RaoParameters& p) {
+        std::vector<std::string> groups;
+        groups.reserve(p.predefined_combinations.size());
+        for (const auto& combo : p.predefined_combinations) {
+            std::string joined;
+            for (size_t i = 0; i < combo.size(); ++i) {
+                if (i) joined += '\t';
+                joined += combo[i];
+            }
+            groups.push_back(joined);
+        }
+        return groups;
+    })
+    .method("predefined_combinations", [] (pypowsybl::RaoParameters& p, std::vector<std::string> const& groups) {
+        std::vector<std::vector<std::string>> combos;
+        combos.reserve(groups.size());
+        for (const auto& group : groups) {
+            std::vector<std::string> combo;
+            std::string current;
+            for (char ch : group) {
+                if (ch == '\t') { combo.push_back(current); current.clear(); }
+                else { current += ch; }
+            }
+            combo.push_back(current);
+            combos.push_back(std::move(combo));
+        }
+        p.predefined_combinations = std::move(combos);
+    });
+
   mod.method("run_rao_with_parameters_object", [] (pypowsybl::JavaHandle network, pypowsybl::JavaHandle crac, pypowsybl::JavaHandle rao,
                                                    const pypowsybl::RaoParameters& parameters, std::string const& provider) {
             return pypowsybl::runRaoWithParameters(network, crac, rao, parameters, provider);
