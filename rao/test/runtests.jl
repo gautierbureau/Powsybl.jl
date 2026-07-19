@@ -98,6 +98,51 @@ end
   @test redo.initial_min_margin ≈ result.min_margin atol = 1.0
 end
 
+@testset "Inter-temporal (Marmot-style) ramp coupling" begin
+  LIB = Powsybl.LibPowsybl
+  crac_path = joinpath(DATA, "rao_crac.json")
+
+  base = Powsybl.Network.load(joinpath(DATA, "rao_network.uct"))
+  crac = RAO.load_crac(base, crac_path)
+
+  # A second timestamp: a strong France -> Germany generation shift, which moves the optimal
+  # PST tap far from the base case.
+  shifted = Powsybl.Network.load(joinpath(DATA, "rao_network.uct"))
+  Powsybl.Network.update_elements(shifted, LIB.GENERATOR;
+    id = ["FFR1AA1 _generator", "FFR2AA1 _generator", "FFR3AA1 _generator"], target_p = [0.0, 0.0, 0.0])
+  Powsybl.Network.update_elements(shifted, LIB.GENERATOR;
+    id = ["DDE1AA1 _generator", "DDE2AA1 _generator", "DDE3AA1 _generator"], target_p = [4500.0, 4000.0, 4500.0])
+  networks = [base, shifted]
+
+  # Independent per-timestamp optima — the two timestamps genuinely want different taps
+  o1 = PowsyblRao.solve_preventive(base, crac)
+  o2 = PowsyblRao.solve_preventive(shifted, RAO.load_crac(shifted, crac_path))
+  tap1 = PowsyblRao.range_action(o1, "PRA_PST_BE").tap
+  tap2 = PowsyblRao.range_action(o2, "PRA_PST_BE").tap
+  @test tap1 != tap2
+
+  pst(sol, t) = PowsyblRao.range_action(sol.range_actions[t], "PRA_PST_BE")
+
+  # Loose ramp: the timestamps decouple, so the global optimum is the worse of the two
+  # independent optima (whichever timestamp is binding reaches its own optimum).
+  loose = PowsyblRao.solve_intertemporal(networks, crac; gradient = 20.0)
+  @test string(loose.termination) == "OPTIMAL"
+  @test loose.min_margin ≈ min(o1.min_margin, o2.min_margin) atol = 1.0
+
+  # Rigid ramp (gradient 0): the tap is forced identical across timestamps, even though the
+  # two timestamps independently want different taps. Coupling can only reduce (or tie) the
+  # achievable global minimum margin.
+  rigid = PowsyblRao.solve_intertemporal(networks, crac; gradient = 0.0)
+  @test pst(rigid, 1).tap == pst(rigid, 2).tap
+  @test rigid.min_margin <= loose.min_margin + 1e-6
+
+  # A tight but non-zero ramp respects the gradient on the phase-shift angle and sits between
+  # the rigid and loose regimes.
+  tight = PowsyblRao.solve_intertemporal(networks, crac; gradient = 1.0)
+  @test abs(pst(tight, 1).set_point - pst(tight, 2).set_point) <= 1.0 + 1e-6
+  @test rigid.min_margin - 1e-6 <= tight.min_margin <= loose.min_margin + 1e-6
+end
+
 @testset "Injection (redispatching) range action vs OpenRAO" begin
   network = Powsybl.Network.load(joinpath(DATA, "2nodes.uct"))
   crac = RAO.load_crac(network, joinpath(DATA, "crac-simple-rd-mw.json"))

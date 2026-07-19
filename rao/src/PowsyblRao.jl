@@ -66,8 +66,9 @@ module PowsyblRao
     termination::Any
   end
 
-  "Fetch the optimized range action with the given id."
-  range_action(sol::Solution, id::AbstractString) = sol.range_actions[findfirst(r -> r.id == id, sol.range_actions)]
+  "Fetch the optimized range action with the given id, from a solution or a vector."
+  range_action(ras::AbstractVector{RangeActionSolution}, id::AbstractString) = ras[findfirst(r -> r.id == id, ras)]
+  range_action(sol::Solution, id::AbstractString) = range_action(sol.range_actions, id)
 
   _nearest_tap(angle_by_tap, angle, taps) = argmin(t -> abs(angle_by_tap[t] - angle), taps)
 
@@ -310,5 +311,106 @@ module PowsyblRao
       _apply_tap(network, pst_element[ra.id], ra.tap)
     end
     return network
+  end
+
+  """
+  Result of [`solve_intertemporal`](@ref):
+  - `range_actions[t]`: the optimized range actions at timestamp `t` (a vector of
+    [`RangeActionSolution`](@ref));
+  - `min_margin`: the global minimum margin (MW) over every timestamp and CNEC;
+  - `per_timestamp_min_margin[t]`: the minimum margin at timestamp `t`;
+  - `termination`: the JuMP status.
+  """
+  struct InterTemporalSolution
+    range_actions::Vector{Vector{RangeActionSolution}}
+    min_margin::Float64
+    per_timestamp_min_margin::Vector{Float64}
+    termination::Any
+  end
+
+  """
+      solve_intertemporal(networks, crac; gradient, optimizer = HiGHS.Optimizer,
+                          discrete = true, dc = true) -> InterTemporalSolution
+
+  Time-coupled ("Marmot-style") RAO over a series of timestamps. `networks` is one network per
+  timestamp (same CRAC / range actions, e.g. a load profile); the range-action set points are
+  optimized jointly to maximize the global minimum margin, subject to **inter-temporal ramp
+  constraints** linking consecutive timestamps:
+
+      |set_point(ra, t+1) − set_point(ra, t)| ≤ gradient(ra)
+
+  `gradient` is the maximum set-point change per timestamp — a scalar applied to all range
+  actions, or a `Dict` of range-action id → limit — in the set point's own unit (phase-shift
+  degrees for a PST, MW for an injection). This mirrors OpenRAO's Marmot power-gradient
+  coupling (its `GeneratorConstraintsFiller`); Marmot additionally models generator
+  unit-commitment (on/off, minimum up/down times), which is out of scope here.
+
+  A single DC linearization per timestamp (exact in DC); no SLP loop.
+  """
+  function solve_intertemporal(networks::AbstractVector, crac::Powsybl.RAO.Crac;
+                               gradient, optimizer = HiGHS.Optimizer, discrete::Bool = true, dc::Bool = true)
+    T = length(networks)
+    T >= 2 || error("PowsyblRao.solve_intertemporal needs at least two timestamps")
+    cnecs = _cnec_data(crac)
+    ras = _range_actions(crac, networks[1])
+    grad(id) = gradient isa AbstractDict ? Float64(gradient[id]) : Float64(gradient)
+    lin = Dict(ra.id => (ra.kind == :pst ? ra.angle_by_tap[ra.current_tap] : 0.0) for ra in ras)
+
+    sf = [_sensitivities(networks[t], cnecs, ras; dc = dc) for t in 1:T]
+    S = first.(sf)
+    F = last.(sf)
+
+    model = Model(optimizer)
+    set_silent(model)
+    @variable(model, min_margin)
+    setpoint = Dict{Tuple{String, Int}, Any}()
+    zvars = Dict{Tuple{String, Int}, Any}()
+    for ra in ras, t in 1:T
+      if ra.kind == :pst
+        z = @variable(model, [ra.valid_taps], Bin)
+        @constraint(model, sum(z[k] for k in ra.valid_taps) == 1)
+        setpoint[(ra.id, t)] = @expression(model, sum(ra.angle_by_tap[k] * z[k] for k in ra.valid_taps))
+        zvars[(ra.id, t)] = z
+      else
+        setpoint[(ra.id, t)] = @variable(model, lower_bound = ra.setpoint_min, upper_bound = ra.setpoint_max)
+      end
+    end
+    # Inter-temporal ramp coupling.
+    for ra in ras, t in 1:(T - 1)
+      g = grad(ra.id)
+      @constraint(model, setpoint[(ra.id, t + 1)] - setpoint[(ra.id, t)] <= g)
+      @constraint(model, setpoint[(ra.id, t)] - setpoint[(ra.id, t + 1)] <= g)
+    end
+    # Per-timestamp CNEC margin constraints against the shared global minimum margin.
+    for t in 1:T, j in eachindex(cnecs.cnec_ids)
+      flow = @expression(model, F[t][j] + sum(S[t][ra.id][j] * (setpoint[(ra.id, t)] - lin[ra.id]) for ra in ras))
+      id = cnecs.cnec_ids[j]
+      haskey(cnecs.tmax, id) && @constraint(model, min_margin <= cnecs.tmax[id] - flow)
+      haskey(cnecs.tmin, id) && @constraint(model, min_margin <= flow - cnecs.tmin[id])
+    end
+    @objective(model, Max, min_margin)
+    optimize!(model)
+
+    per_t = Vector{Vector{RangeActionSolution}}(undef, T)
+    per_t_mm = Vector{Float64}(undef, T)
+    for t in 1:T
+      sols = RangeActionSolution[]
+      points = Dict{String, Float64}()
+      for ra in ras
+        if ra.kind == :pst
+          tap = ra.valid_taps[argmax([value(zvars[(ra.id, t)][k]) for k in ra.valid_taps])]
+          points[ra.id] = ra.angle_by_tap[tap]
+          push!(sols, RangeActionSolution(ra.id, ra.kind, ra.angle_by_tap[tap], tap))
+        else
+          sp = value(setpoint[(ra.id, t)])
+          points[ra.id] = sp
+          push!(sols, RangeActionSolution(ra.id, ra.kind, sp, nothing))
+        end
+      end
+      flows = [F[t][j] + sum(S[t][ra.id][j] * (points[ra.id] - lin[ra.id]) for ra in ras) for j in eachindex(cnecs.cnec_ids)]
+      per_t[t] = sols
+      per_t_mm[t] = first(_min_margin(cnecs.cnec_ids, flows, cnecs.tmin, cnecs.tmax))
+    end
+    return InterTemporalSolution(per_t, value(min_margin), per_t_mm, termination_status(model))
   end
 end
