@@ -45,9 +45,11 @@ so `gᵢ` must accept arguments that are either numbers or JuMP variables.
   Shrinking `ε` drives the upper bound down to the lower bound. Returns feasible iterates.
 * **`solve_minmax`** — robust min-max `min_x max_y F(x, y)` via the epigraph reformulation
   `min t s.t. F(x, y) − t ≤ 0 ∀ y`, solved with `solve_bnf`.
-
-_(the existence-constrained SIP variant — `∀y ∃z: g(x, y, z) ≤ 0`, whose separation is a
-max-min oracle — is being added as a further increment.)_
+* **`solve_esip_bnf`** — existence-constrained SIP `min f(x) s.t. ∀y ∃z: g(x, y, z) ≤ 0`. The
+  lower-bounding problem gives each discretized parameter its own recourse `z`; the separation
+  is the feasibility function `φ(x) = max_y min_z g(x, y, z)`, evaluated by reusing
+  `solve_minmax` (since `max_y min_z g = −(min_y max_z −g)`). The nesting bottoms out in
+  `solve_bnf`.
 
 ## Usage
 

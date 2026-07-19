@@ -93,6 +93,38 @@ end
     @test res.x ≈ [1.0, 1.0] atol = 1e-2
 end
 
+@testset "ESIP (existence-constrained) via nested min-max separation" begin
+    # min x  s.t.  ∀ y ∈ [0,1]  ∃ z ∈ [0,1] :  2y - z - x ≤ 0,   x ∈ [0,10]
+    # Recourse z can absorb one unit: need x ≥ 2y - z ≥ 2y - 1; worst y = 1 → x* = 1
+    # (without recourse it would be x ≥ 2). Feasibility fn φ(x)=max_y min_z (2y-z-x)=1-x.
+    p = ESIPProblem(nx = 1, ny = 1, nz = 1,
+                    x_lower = 0.0, x_upper = 10.0,
+                    y_lower = 0.0, y_upper = 1.0,
+                    z_lower = 0.0, z_upper = 1.0,
+                    objective = x -> x[1],
+                    constraint = (x, y, z) -> 2 * y[1] - z[1] - x[1])
+    res = solve_esip_bnf(p)
+
+    @test res.status == :optimal
+    @test res.x[1] ≈ 1.0 atol = 1e-5
+    @test res.objective ≈ 1.0 atol = 1e-5
+    @test res.max_violation <= 1e-6          # φ(x*) ≤ 0
+    @test any(y -> isapprox(y[1], 1.0, atol = 1e-5), res.discretization)  # worst y* = 1
+end
+
+@testset "ESIP recourse actually matters" begin
+    # Same problem but the recourse is disabled (z fixed at 0): now x* = 2, not 1.
+    p = ESIPProblem(nx = 1, ny = 1, nz = 1,
+                    x_lower = 0.0, x_upper = 10.0,
+                    y_lower = 0.0, y_upper = 1.0,
+                    z_lower = 0.0, z_upper = 0.0,   # no recourse
+                    objective = x -> x[1],
+                    constraint = (x, y, z) -> 2 * y[1] - z[1] - x[1])
+    res = solve_esip_bnf(p)
+    @test res.status == :optimal
+    @test res.x[1] ≈ 2.0 atol = 1e-5
+end
+
 @testset "Min-max (robust) via SIP reformulation" begin
     # min_x max_{y∈[0,1]} (x + 2y - 2xy),  x ∈ [0,2]
     # max_y is linear in y: 2-x for x<1, x for x>1  →  min at x* = 1, value = 1.

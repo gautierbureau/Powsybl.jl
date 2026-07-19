@@ -29,6 +29,7 @@ using JuMP
 import HiGHS
 
 export SIPProblem, SIPOptions, SIPResult, MinMaxResult, solve_bnf, solve_rrhs, solve_minmax
+export ESIPProblem, ESIPResult, solve_esip_bnf
 
 # ---------------------------------------------------------------------------
 # Problem definition
@@ -388,6 +389,149 @@ function solve_minmax(; nx::Int, ny::Int, x_lower, x_upper, y_lower, y_upper, F:
     res = solve_bnf(problem, options)
     return MinMaxResult(res.status, res.x[1:nx], res.x[nx + 1], res.iterations,
                         res.discretization, res.history)
+end
+
+# ---------------------------------------------------------------------------
+# Existence-constrained SIP (ESIP) by cutting planes
+# ---------------------------------------------------------------------------
+"""
+    ESIPProblem(; nx, ny, nz, x_lower, x_upper, y_lower, y_upper, z_lower, z_upper,
+                objective, constraint, sense = :Min, x_integer = false)
+
+An existence-constrained semi-infinite program
+
+    min_{x ∈ X}  f(x)
+    s.t.         ∀ y ∈ Y  ∃ z ∈ Z :  g(x, y, z) ≤ 0
+
+— for every parameter `y` there must *exist* a recourse `z` making the constraint hold (a
+two-stage / adjustable-robust structure). `objective` is `f(x)`; `constraint` is
+`g(x, y, z)` accepting numbers or JuMP variables in any argument.
+"""
+struct ESIPProblem
+    nx::Int
+    ny::Int
+    nz::Int
+    x_lower::Vector{Float64}
+    x_upper::Vector{Float64}
+    y_lower::Vector{Float64}
+    y_upper::Vector{Float64}
+    z_lower::Vector{Float64}
+    z_upper::Vector{Float64}
+    objective::Function
+    constraint::Function
+    sense::Symbol
+    x_integer::Vector{Bool}
+end
+
+function ESIPProblem(; nx::Int, ny::Int, nz::Int, x_lower, x_upper, y_lower, y_upper,
+                     z_lower, z_upper, objective::Function, constraint::Function,
+                     sense::Symbol = :Min, x_integer = false)
+    sense in (:Min, :Max) || throw(ArgumentError("sense must be :Min or :Max"))
+    return ESIPProblem(nx, ny, nz, _vec(x_lower, nx), _vec(x_upper, nx), _vec(y_lower, ny),
+                       _vec(y_upper, ny), _vec(z_lower, nz), _vec(z_upper, nz),
+                       objective, constraint, sense, _bvec(x_integer, nx))
+end
+
+"See [`SIPResult`](@ref); `max_violation` here is `maxᵧ minᵤ g(x, y, z)` at termination."
+struct ESIPResult
+    status::Symbol
+    x::Vector{Float64}
+    objective::Float64
+    bound::Float64
+    iterations::Int
+    max_violation::Float64
+    discretization::Vector{Vector{Float64}}
+    history::Vector{NamedTuple}
+end
+
+# Lower-bounding problem: enforce the existence constraint only at the accumulated parameter
+# points, giving each one its *own* recourse variable zⱼ (a relaxation → valid bound).
+function _build_esip_lbp(problem::ESIPProblem, Y, options::SIPOptions)
+    model = Model(_lbp_opt(options))
+    options.silent && set_silent(model)
+    @variable(model, x[i = 1:problem.nx])
+    for i in 1:problem.nx
+        set_lower_bound(x[i], problem.x_lower[i])
+        set_upper_bound(x[i], problem.x_upper[i])
+        problem.x_integer[i] && set_integer(x[i])
+    end
+    @objective(model, problem.sense == :Min ? MOI.MIN_SENSE : MOI.MAX_SENSE, problem.objective(x))
+    for y in Y
+        z = @variable(model, [1:problem.nz])
+        for l in 1:problem.nz
+            set_lower_bound(z[l], problem.z_lower[l])
+            set_upper_bound(z[l], problem.z_upper[l])
+        end
+        @constraint(model, problem.constraint(x, y, z) <= 0)
+    end
+    return model, x
+end
+
+"""
+    solve_esip_bnf(problem::ESIPProblem, options::SIPOptions = SIPOptions();
+                   inner_options = options) -> ESIPResult
+
+Solve an existence-constrained SIP by the cutting-plane algorithm. Each iteration solves the
+lower-bounding problem (existence enforced at the current parameter points, one recourse
+variable per point) for an incumbent `x̂`, then evaluates the feasibility function
+
+    φ(x̂) = max_{y ∈ Y} min_{z ∈ Z} g(x̂, y, z)
+
+as the **separation** step. This max-min is solved by reusing [`solve_minmax`](@ref) on
+`F(y, z) = -g(x̂, y, z)`, since `max_y min_z g = -(min_y max_z -g)`; the min-max's optimal
+decision is the worst-case parameter `y*`. If `φ(x̂) ≤ feas_tol`, `x̂` is ESIP-feasible and
+(being optimal for a relaxation) globally optimal; otherwise `y*` is added to the parameter set
+and the loop repeats. `inner_options` configures the nested min-max solves.
+"""
+function solve_esip_bnf(problem::ESIPProblem, options::SIPOptions = SIPOptions();
+                        inner_options::SIPOptions = options)
+    Y = Vector{Float64}[]
+    history = NamedTuple[]
+    bound = problem.sense == :Min ? -Inf : Inf
+    x_inc = fill(NaN, problem.nx)
+    f_inc = NaN
+    phi = Inf
+    status = :max_iter
+    iterations = 0
+
+    for k in 1:options.max_iter
+        iterations = k
+
+        model, x = _build_esip_lbp(problem, Y, options)
+        optimize!(model)
+        st = termination_status(model)
+        if st in (MOI.INFEASIBLE, MOI.INFEASIBLE_OR_UNBOUNDED)
+            status = :infeasible
+            break
+        end
+        st in (MOI.OPTIMAL, MOI.LOCALLY_SOLVED) ||
+            error("ESIP lower-bounding problem terminated with status $st")
+        bound = objective_value(model)
+        x_hat = value.(x)
+        x_inc = x_hat
+        f_inc = bound
+
+        # Separation: φ(x̂) = max_y min_z g = -(min_y max_z -g), a min-max in (y, z).
+        mm = solve_minmax(nx = problem.ny, ny = problem.nz,
+                          x_lower = problem.y_lower, x_upper = problem.y_upper,
+                          y_lower = problem.z_lower, y_upper = problem.z_upper,
+                          F = (y, z) -> -problem.constraint(x_hat, y, z),
+                          options = inner_options)
+        mm.status == :optimal || error("ESIP separation (min-max) did not converge: $(mm.status)")
+        phi = -mm.value
+        y_star = mm.x
+
+        push!(history, (iter = k, bound = bound, phi = phi, n_disc = length(Y)))
+        options.verbose && @info "ESIP-BNF" iter = k bound = bound phi = phi n_disc = length(Y)
+
+        if phi <= options.feas_tol
+            status = :optimal
+            break
+        end
+        _is_duplicate(y_star, Y, options.dedup_tol) || push!(Y, y_star)
+    end
+
+    return ESIPResult(status, x_inc, f_inc, bound, iterations, phi, Y, history)
 end
 
 end # module
