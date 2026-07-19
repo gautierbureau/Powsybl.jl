@@ -762,6 +762,13 @@ end
   @test RAO.get_status(angle_monitored) == RAO.DEFAULT
   angle_cnecs = RAO.get_angle_cnec_results(angle_monitored)
   @test names(angle_cnecs) == ["index", "cnec_id", "optimized_instant", "contingency", "angle", "margin"]
+  # Virtual costs are reported per named contributor, one column of values per instant
+  vc_names = RAO.get_virtual_cost_names(result)
+  @test vc_names isa Vector{String}
+  @test "loop-flow-cost" in vc_names
+  loop_flow = RAO.get_virtual_cost_results(result, "loop-flow-cost")
+  @test names(loop_flow) == ["optimized_instant", "loop-flow-cost"]
+  @test "initial" in loop_flow[:, "optimized_instant"]
 end
 
 @testset "Test CRAC introspection" begin
@@ -794,4 +801,44 @@ end
   # The angle/voltage CNEC accessors return the right (empty) schema for this CRAC
   @test "importing_network_element_id" in names(RAO.get_angle_cnecs(crac))
   @test "network_element_id" in names(RAO.get_voltage_cnecs(crac))
+end
+
+@testset "Test CRAC introspection (thresholds, actions, rules, limits)" begin
+  RAO = Powsybl.RAO
+  network = Powsybl.Network.load("data/rao/rao_network.uct")
+  crac = RAO.load_crac(network, "data/rao/rao_crac.json")
+
+  # Thresholds back the flow CNECs (one per CNEC here), range action ranges back the PST
+  thresholds = RAO.get_thresholds(crac)
+  @test issubset(["id", "min", "max", "unit", "side"], names(thresholds))
+  @test size(thresholds, 1) == 7
+  ranges = RAO.get_range_action_ranges(crac)
+  @test issubset(["id", "min", "max", "range_type"], names(ranges))
+  @test size(ranges, 1) == 1
+
+  # Elementary action accessors: this CRAC has no network actions, so all are empty
+  # but expose their columnar schema.
+  @test "action_type" in names(RAO.get_terminal_connection_actions(crac))
+  @test "tap_position" in names(RAO.get_pst_tap_position_actions(crac))
+  @test "active_power_value" in names(RAO.get_generator_actions(crac))
+  @test "active_power_value" in names(RAO.get_load_actions(crac))
+  @test "active_power_value" in names(RAO.get_boundary_line_actions(crac))
+  @test "section_count" in names(RAO.get_shunt_compensator_position_actions(crac))
+  @test "action_type" in names(RAO.get_switch_actions(crac))
+  @test issubset(["open", "close"], names(RAO.get_switch_pairs(crac)))
+  @test "operator" in names(RAO.get_counter_trade_range_actions(crac))
+  @test "distribution_key" in names(RAO.get_network_element_ids_and_keys(crac))
+
+  # Usage rules: the schema of each rule family is exposed regardless of presence.
+  @test issubset(["id", "instant"], names(RAO.get_on_instant_usage_rules(crac)))
+  @test "contingency_id" in names(RAO.get_on_contingency_state_usage_rules(crac))
+  @test "cnec_id" in names(RAO.get_on_constraint_usage_rules(crac))
+  @test "country" in names(RAO.get_on_flow_constraint_in_country_usage_rules(crac))
+
+  # Usage limits: caps on remedial actions, globally and per TSO.
+  @test issubset(["instant", "value"], names(RAO.get_max_remedial_actions_usage_limits(crac)))
+  @test "tso" in names(RAO.get_max_topological_actions_per_tso_usage_limits(crac))
+  @test "tso" in names(RAO.get_max_pst_actions_per_tso_usage_limits(crac))
+  @test "tso" in names(RAO.get_max_remedial_actions_per_tso_usage_limits(crac))
+  @test "tso" in names(RAO.get_max_elementary_actions_per_tso_usage_limits(crac))
 end

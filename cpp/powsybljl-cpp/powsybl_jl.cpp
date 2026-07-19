@@ -1483,4 +1483,102 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
   mod.method("get_crac_network_actions", [] (pypowsybl::JavaHandle crac) {
             return pypowsybl::getCracNetworkActions(crac);
     }, "Get the network actions of a CRAC");
+
+  mod.method("get_crac_thresholds", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getThresholds(crac);
+    }, "Get the thresholds of the CNECs of a CRAC");
+
+  mod.method("get_crac_range_action_ranges", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracRangeActionRanges(crac);
+    }, "Get the ranges of the range actions of a CRAC");
+
+  mod.method("get_crac_counter_trade_range_actions", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracCounterTradeRangeActions(crac);
+    }, "Get the counter trade range actions of a CRAC");
+
+  mod.method("get_crac_terminal_connection_actions", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracTerminalConnectionActions(crac);
+    }, "Get the terminal connection (elementary) actions of a CRAC");
+
+  mod.method("get_crac_pst_tap_position_actions", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracPstTapPositionActions(crac);
+    }, "Get the PST tap position (elementary) actions of a CRAC");
+
+  mod.method("get_crac_generator_actions", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracGeneratorActions(crac);
+    }, "Get the generator (elementary) actions of a CRAC");
+
+  mod.method("get_crac_load_actions", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracLoadActions(crac);
+    }, "Get the load (elementary) actions of a CRAC");
+
+  mod.method("get_crac_boundary_line_actions", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracBoundaryLineActions(crac);
+    }, "Get the boundary line (elementary) actions of a CRAC");
+
+  mod.method("get_crac_shunt_compensator_position_actions", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracShuntCompensatorPositionActions(crac);
+    }, "Get the shunt compensator position (elementary) actions of a CRAC");
+
+  mod.method("get_crac_switch_actions", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracSwitchActions(crac);
+    }, "Get the switch (elementary) actions of a CRAC");
+
+  mod.method("get_crac_switch_pairs", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracSwitchPairs(crac);
+    }, "Get the switch pair (elementary) actions of a CRAC");
+
+  mod.method("get_crac_network_element_ids_and_keys", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getNetworkElementIdsAndKeys(crac);
+    }, "Get the network elements referenced by a CRAC and their keys");
+
+  // Usage rules: the conditions under which each remedial action may be applied.
+  mod.method("get_crac_on_instant_usage_rules", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getOnInstantUsageRules(crac);
+    }, "Get the OnInstant usage rules of a CRAC");
+
+  mod.method("get_crac_on_contingency_state_usage_rules", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getOnContingencyStateUsageRules(crac);
+    }, "Get the OnContingencyState usage rules of a CRAC");
+
+  mod.method("get_crac_on_constraint_usage_rules", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getOnConstraintUsageRules(crac);
+    }, "Get the OnConstraint usage rules of a CRAC");
+
+  mod.method("get_crac_on_flow_constraint_in_country_usage_rules", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getOnFlowConstraintInCountryUsageRules(crac);
+    }, "Get the OnFlowConstraintInCountry usage rules of a CRAC");
+
+  // Usage limits: the caps on how many remedial actions may be applied (globally / per TSO).
+  mod.method("get_crac_max_remedial_actions_usage_limits", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getMaxRemedialActionsUsageLimits(crac);
+    }, "Get the maximum remedial actions usage limits of a CRAC");
+
+  mod.method("get_crac_max_topological_actions_per_tso_usage_limits", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getMaxTopologicalActionsPerTsoUsageLimits(crac);
+    }, "Get the maximum topological actions per TSO usage limits of a CRAC");
+
+  mod.method("get_crac_max_pst_actions_per_tso_usage_limits", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getMaxPstActionsPerTsoUsageLimits(crac);
+    }, "Get the maximum PST actions per TSO usage limits of a CRAC");
+
+  mod.method("get_crac_max_remedial_actions_per_tso_usage_limits", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getMaxRemedialActionsPerTsoUsageLimits(crac);
+    }, "Get the maximum remedial actions per TSO usage limits of a CRAC");
+
+  mod.method("get_crac_max_elementary_actions_per_tso_usage_limits", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getMaxElementaryActionsPerTsoUsageLimits(crac);
+    }, "Get the maximum elementary actions per TSO usage limits of a CRAC");
+
+  // ---------------------------------------------------------------------------
+  // RAO result: virtual costs (per named virtual-cost contributor)
+  // ---------------------------------------------------------------------------
+
+  mod.method("get_rao_virtual_cost_names", [] (pypowsybl::JavaHandle result) {
+            return pypowsybl::getVirtualCostNames(result);
+    }, "Get the names of the virtual costs tracked by a RAO result");
+
+  mod.method("get_rao_virtual_cost_results", [] (pypowsybl::JavaHandle crac, pypowsybl::JavaHandle result, std::string const& name) {
+            return pypowsybl::getVirtualCostsResults(crac, result, name);
+    }, "Get the per-CNEC results for a named virtual cost of a RAO result");
 }
