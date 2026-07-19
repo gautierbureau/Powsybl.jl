@@ -24,6 +24,22 @@ with the PST phase-shift angle `φ` a continuous decision variable (`|φ| ≤ 30
 
 The two are mathematically equivalent and agree branch-by-branch on the test fixture.
 
+* **`ptdf_iterative`** — the same PTDF model solved by **incremental constraint generation**
+  (a cutting-plane / lazy-constraint scheme): start with the power balance only, run a DC load
+  flow as the violation oracle, fetch PTDF/PSDF rows *only* for the branches that overload, add
+  their limits, and repeat until no new violation appears. Reaches the same optimum as
+  `ptdf_formulation` without ever assembling a full PTDF matrix.
+
+## Genericity
+
+The three solvers read the network's *actual* generators, loads, buses, lines, transformers,
+PSTs and voltage levels, so they apply to **any network** — nothing about the fixture topology
+is baked into the logic. The two pieces of data that are not part of the grid model are passed
+as keyword arguments (defaulted to the fixture): per-branch **thermal limits**
+(`line_max_p` / `tfo_max_p`, keyed by branch id; a branch with no entry is left unlimited) and
+per-generator **cost** (`cost`, keyed by generator id; a generator with no entry defaults to
+0). The slack is the network's first bus (flows are slack-invariant for a balanced injection).
+
 ## Fixture
 
 `build_pst_network()` builds the `pst_focus` case: two parallel paths S1→S2 — one bypassing
@@ -55,6 +71,10 @@ pt = D.ptdf_formulation(net)    # PTDF formulation (identical result)
 th.generation      # Dict("G1" => 200.0, "G2" => 50.0)
 th.flows["L12a"]   # 110.0  (binding)
 rad2deg(th.phi["PST_T"])   # ≈ 13.18°
+
+# Same optimum by lazy constraint generation
+it = D.ptdf_iterative(net)
+it.active_constraints   # ["L2b_3", "L12a"]  (only the binding branches)
 
 # Deploy the dispatch + PST tap and check against a DC load flow
 lf = D.validate_with_dc_loadflow(net, th)

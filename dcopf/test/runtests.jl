@@ -109,6 +109,33 @@ end
     end
 end
 
+@testset "Iterative PTDF (lazy constraint generation)" begin
+    net = D.build_pst_network()
+    full = D.ptdf_formulation(net)
+
+    net2 = D.build_pst_network()
+    it = D.ptdf_iterative(net2)
+
+    @test string(it.solution.termination) == "OPTIMAL"
+    # Constraint generation reaches the same optimum as the full formulation.
+    @test it.solution.generation["G1"] ≈ full.generation["G1"] atol = 1e-3
+    @test it.solution.generation["G2"] ≈ full.generation["G2"] atol = 1e-3
+    @test it.solution.phi["PST_T"] ≈ full.phi["PST_T"] atol = 1e-4
+    @test it.solution.cost ≈ full.cost atol = 1e-2
+
+    # Only the two branches that actually bind ever got a sensitivity row / constraint.
+    @test Set(it.active_constraints) == Set(["L12a", "L2b_3"])
+    @test it.iterations <= 3
+
+    # Uncongested: only the exit line binds, and the loop converges cleanly (φ = 0 → tap 10,
+    # so the load-flow oracle sees no residual violation).
+    net3 = D.build_pst_network()
+    itu = D.ptdf_iterative(net3; line_max_p = UNCONGESTED)
+    @test Set(itu.active_constraints) == Set(["L2b_3"])
+    @test itu.converged
+    @test rad2deg(itu.solution.phi["PST_T"]) ≈ 0.0 atol = 1e-6
+end
+
 @testset "PST relieves congestion" begin
     net = D.build_pst_network()
     tight = D.theta_formulation(net)                      # L12a ≤ 110 → PST active

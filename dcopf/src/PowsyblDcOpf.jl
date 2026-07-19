@@ -182,10 +182,11 @@ function _branches(lines, tfos, psts, nominal_v, line_max_p, tfo_max_p)
     return out
 end
 
-# Generators as (id, bus, min, max, cost); loads aggregated per bus.
+# Generators as (id, bus, min, max, cost); loads aggregated per bus. A generator absent from
+# `cost` defaults to 0 (cost is external economic data, not part of the grid model).
 function _generators(gens, cost)
     [(id = gens[i, :id], bus = gens[i, :bus_id], min = gens[i, :min_p], max = gens[i, :max_p],
-      cost = cost[gens[i, :id]]) for i in _rows(gens)]
+      cost = get(cost, gens[i, :id], 0.0)) for i in _rows(gens)]
 end
 
 function _load_by_bus(loads)
@@ -194,6 +195,34 @@ function _load_by_bus(loads)
         d[loads[i, :bus_id]] = get(d, loads[i, :bus_id], 0.0) + loads[i, :p0]
     end
     return d
+end
+
+# One representative injection element per bus (a generator is preferred over a load so all
+# injection sensitivities share the generator sign convention), aligned with the sorted
+# injection buses so PTDF rows map cleanly onto bus net injections.
+function _injection_variables(gens_df, loads)
+    rep = Dict{String,String}()
+    for i in _rows(gens_df); b = gens_df[i, :bus_id]; haskey(rep, b) || (rep[b] = gens_df[i, :id]); end
+    for i in _rows(loads);   b = loads[i, :bus_id];   haskey(rep, b) || (rep[b] = loads[i, :id]);   end
+    inj_buses = sort(collect(keys(rep)))
+    return inj_buses, [rep[b] for b in inj_buses]
+end
+
+# DC (or AC) sensitivity rows: PTDF (branch flow / bus injection, one column per branch) and
+# PSDF (branch flow / PST phase, converted to per-radian). Both matrices are rows = variables.
+function _sensitivity_rows(network, branch_ids, inj_vars, pst_ids; dc = true)
+    analysis = SEN.create()
+    SEN.add_factor_matrix(analysis, branch_ids, inj_vars; matrix_id = "PTDF",
+        sensitivity_function_type = SEN.BRANCH_ACTIVE_POWER_1,
+        sensitivity_variable_type = SEN.INJECTION_ACTIVE_POWER)
+    SEN.add_factor_matrix(analysis, branch_ids, pst_ids; matrix_id = "PSDF",
+        sensitivity_function_type = SEN.BRANCH_ACTIVE_POWER_1,
+        sensitivity_variable_type = SEN.TRANSFORMER_PHASE)
+    params = LF.load_flow_parameters(); params.distributed_slack = false
+    result = dc ? SEN.run_dc(analysis, network, params) : SEN.run_ac(analysis, network, params)
+    ptdf = SEN.get_sensitivity_matrix(result, "PTDF")
+    psdf = SEN.get_sensitivity_matrix(result, "PSDF") .* (180 / pi)
+    return ptdf, psdf
 end
 
 # ---------------------------------------------------------------------------
@@ -278,6 +307,129 @@ function theta_formulation(network;
         Dict(b => value(θ[b]) for b in bus_ids))
 end
 
+# Deploy a dispatch and PST tap onto the network and run a DC load flow, returning per-branch
+# side-1 flows (lines and transformers). Used as the violation oracle in the iterative solve.
+function _deploy_and_flow(network, gen_ids, gen_vals, pst_ids, phi_vals)
+    NET.update_generators(network; id = gen_ids, target_p = gen_vals)
+    for p in pst_ids
+        NET.update_elements(network, LIB.PHASE_TAP_CHANGER; id = p, tap = phi_to_tap(phi_vals[p]))
+    end
+    params = LF.load_flow_parameters(); params.distributed_slack = false
+    LF.run_dc(network, params)
+    lines = NET.get_lines(network, true)
+    tfos  = NET.get_2_windings_transformers(network, true)
+    flows = Dict{String,Float64}()
+    for i in _rows(lines); flows[lines[i, :id]] = lines[i, :p1]; end
+    for i in _rows(tfos);  flows[tfos[i, :id]]  = tfos[i, :p1];  end
+    return flows
+end
+
+# ---------------------------------------------------------------------------
+# Iterative PTDF formulation (lazy constraint generation)
+# ---------------------------------------------------------------------------
+"""
+    IterativeDcOpfSolution
+
+Result of [`ptdf_iterative`](@ref): the final [`DcOpfSolution`](@ref) plus the number of
+iterations, the branches whose thermal constraints were generated (`active_constraints`), and
+whether the loop converged (no violation left) or stopped without adding a new cut.
+"""
+struct IterativeDcOpfSolution
+    solution::DcOpfSolution
+    iterations::Int
+    active_constraints::Vector{String}
+    converged::Bool
+end
+
+"""
+    ptdf_iterative(network; line_max_p, tfo_max_p, cost, pst_cost, optimizer, dc,
+                   viol_tol = 1.0, max_iter = 20) -> IterativeDcOpfSolution
+
+DC-OPF by **incremental PTDF constraint generation** (a cutting-plane / lazy-constraint scheme,
+porting `ptdf_formulation_iterative.py`):
+
+1. Solve with the power balance only (no thermal limits).
+2. Deploy the dispatch + PST tap and run a DC load flow — the engine is the violation oracle.
+3. For each limited branch overloaded by more than `viol_tol`, fetch its PTDF/PSDF row and add
+   the corresponding flow constraint.
+4. Repeat until no new violation appears (or `max_iter`).
+
+Only the branches that actually bind ever get a sensitivity row, so no full PTDF matrix is
+needed. The final LP optimum matches [`ptdf_formulation`](@ref); the difference is purely
+which constraints were enumerated.
+"""
+function ptdf_iterative(network;
+                        line_max_p = DEFAULT_LINE_MAX_P, tfo_max_p = DEFAULT_TFO_MAX_P,
+                        cost = DEFAULT_COST, pst_cost = C_PST, optimizer = HiGHS.Optimizer,
+                        dc = true, viol_tol = 1.0, max_iter = 20)
+    gens_df = NET.get_generators(network, true)
+    loads   = NET.get_loads(network, true)
+    psts    = NET.get_phase_tap_changers(network, true)
+
+    gens     = _generators(gens_df, cost)
+    gen_ids  = [g.id for g in gens]
+    load_bus = _load_by_bus(loads)
+    pst_ids  = collect(psts.id)
+    branch_limit = merge(Dict{String,Float64}(), line_max_p, tfo_max_p)  # only these are policed
+    inj_buses, inj_vars = _injection_variables(gens_df, loads)
+
+    model = Model(optimizer)
+    set_silent(model)
+    @variable(model, Pg[g in gen_ids])
+    for g in gens
+        set_lower_bound(Pg[g.id], g.min); set_upper_bound(Pg[g.id], g.max)
+    end
+    @variable(model, -PHI_MAX <= φ[p in pst_ids] <= PHI_MAX)
+    @variable(model, 0 <= ψ[p in pst_ids] <= PHI_MAX)
+    @constraint(model, [p in pst_ids], ψ[p] >= φ[p])
+    @constraint(model, [p in pst_ids], ψ[p] >= -φ[p])
+    @constraint(model, sum(Pg[g.id] for g in gens) == sum(values(load_bus)))
+    @objective(model, Min,
+        sum(g.cost * Pg[g.id] for g in gens) + pst_cost * sum(ψ[p] for p in pst_ids))
+
+    # Net nodal injection expression per bus (gen variables − fixed load), reused by every cut.
+    netinj = Dict(b => AffExpr(0.0) for b in inj_buses)
+    for g in gens; add_to_expression!(netinj[g.bus], Pg[g.id]); end
+    for (b, pd) in load_bus; add_to_expression!(netinj[b], -pd); end
+
+    added = String[]
+    flow_expr = Dict{String,AffExpr}()
+    iterations = 0
+    converged = false
+    for _ in 1:max_iter
+        iterations += 1
+        optimize!(model)
+
+        flows = _deploy_and_flow(network, gen_ids, [value(Pg[g.id]) for g in gens], pst_ids,
+                                 Dict(p => value(φ[p]) for p in pst_ids))
+        violated = [br for (br, lim) in branch_limit if abs(get(flows, br, 0.0)) > lim + viol_tol]
+        fresh = filter(br -> !(br in added), violated)
+        if isempty(fresh)
+            converged = isempty(violated)   # nothing left to add: either clean or tap-quantised
+            break
+        end
+
+        # Fetch sensitivity rows only for the freshly violated branches and add their limits.
+        ptdf, psdf = _sensitivity_rows(network, fresh, inj_vars, pst_ids; dc = dc)
+        for (j, br) in enumerate(fresh)
+            F = AffExpr(0.0)
+            for (i, b) in enumerate(inj_buses); add_to_expression!(F, ptdf[i, j], netinj[b]); end
+            for (k, p) in enumerate(pst_ids);   add_to_expression!(F, psdf[k, j], φ[p]);       end
+            flow_expr[br] = F
+            @constraint(model, -branch_limit[br] <= F <= branch_limit[br])
+            push!(added, br)
+        end
+    end
+
+    optimize!(model)
+    solution = DcOpfSolution(:ptdf_iterative, termination_status(model), objective_value(model),
+        Dict(g.id => value(Pg[g.id]) for g in gens),
+        Dict(p => value(φ[p]) for p in pst_ids),
+        Dict(br => value(flow_expr[br]) for br in added),
+        Dict{String,Float64}())
+    return IterativeDcOpfSolution(solution, iterations, added, converged)
+end
+
 # ---------------------------------------------------------------------------
 # PTDF formulation
 # ---------------------------------------------------------------------------
@@ -306,26 +458,8 @@ function ptdf_formulation(network;
     pst_ids  = collect(psts.id)
     branch_limit = merge(Dict{String,Union{Nothing,Float64}}(), line_max_p, tfo_max_p)
 
-    # One representative injection element per bus (generator preferred), aligned with the
-    # sorted injection buses so PTDF rows map cleanly to bus net injections.
-    rep = Dict{String,String}()
-    for i in _rows(gens_df); b = gens_df[i, :bus_id]; haskey(rep, b) || (rep[b] = gens_df[i, :id]); end
-    for i in _rows(loads);   b = loads[i, :bus_id];   haskey(rep, b) || (rep[b] = loads[i, :id]);   end
-    inj_buses = sort(collect(keys(rep)))
-    inj_vars  = [rep[b] for b in inj_buses]
-
-    # DC sensitivities: PTDF (branch flow / bus injection) and PSDF (branch flow / PST phase).
-    analysis = SEN.create()
-    SEN.add_factor_matrix(analysis, branch_ids, inj_vars; matrix_id = "PTDF",
-        sensitivity_function_type = SEN.BRANCH_ACTIVE_POWER_1,
-        sensitivity_variable_type = SEN.INJECTION_ACTIVE_POWER)
-    SEN.add_factor_matrix(analysis, branch_ids, pst_ids; matrix_id = "PSDF",
-        sensitivity_function_type = SEN.BRANCH_ACTIVE_POWER_1,
-        sensitivity_variable_type = SEN.TRANSFORMER_PHASE)
-    params = LF.load_flow_parameters(); params.distributed_slack = false
-    result = dc ? SEN.run_dc(analysis, network, params) : SEN.run_ac(analysis, network, params)
-    ptdf = SEN.get_sensitivity_matrix(result, "PTDF")            # (n_inj × n_branch)
-    psdf = SEN.get_sensitivity_matrix(result, "PSDF") .* (180 / pi)  # per-radian (n_pst × n_branch)
+    inj_buses, inj_vars = _injection_variables(gens_df, loads)
+    ptdf, psdf = _sensitivity_rows(network, branch_ids, inj_vars, pst_ids; dc = dc)  # (n_inj/n_pst × n_branch)
 
     model = Model(optimizer)
     set_silent(model)
@@ -393,21 +527,9 @@ run a DC load flow, and return the resulting per-branch flows (side-1 active pow
 tap is discrete, so flows match the continuous OPF exactly only when `φ` lands on a tap.
 """
 function validate_with_dc_loadflow(network, solution::DcOpfSolution)
-    for (g, p) in solution.generation
-        NET.update_generators(network; id = g, target_p = p)
-    end
-    for (p, phi) in solution.phi
-        NET.update_elements(network, LIB.PHASE_TAP_CHANGER; id = p, tap = phi_to_tap(phi))
-    end
-    params = LF.load_flow_parameters(); params.distributed_slack = false
-    LF.run_dc(network, params)
-
-    lines = NET.get_lines(network, true)
-    tfos  = NET.get_2_windings_transformers(network, true)
-    flows = Dict{String,Float64}()
-    for i in _rows(lines); flows[lines[i, :id]] = lines[i, :p1]; end
-    for i in _rows(tfos);  flows[tfos[i, :id]]  = tfos[i, :p1];  end
-    return flows
+    gen_ids = collect(keys(solution.generation))
+    return _deploy_and_flow(network, gen_ids, [solution.generation[g] for g in gen_ids],
+                            collect(keys(solution.phi)), solution.phi)
 end
 
 end # module
