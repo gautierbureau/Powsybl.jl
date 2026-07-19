@@ -79,6 +79,80 @@ module RAO
     return Glsk(LibPowsybl.load_glsk_source(String(read(glsk_file))))
   end
 
+  # ---------------------------------------------------------------------------
+  # CRAC introspection: read the contents of a loaded CRAC as DataFrames.
+  # ---------------------------------------------------------------------------
+
+  """
+      get_contingencies(crac::Crac) -> DataFrame
+
+  Return the contingencies defined in the CRAC (one row per contingency).
+  """
+  get_contingencies(crac::Crac) = _df(LibPowsybl.get_crac_contingencies(crac.handle))
+
+  """
+      get_contingency_elements(crac::Crac) -> DataFrame
+
+  Return the network elements tripped by each contingency (one row per element).
+  """
+  get_contingency_elements(crac::Crac) = _df(LibPowsybl.get_crac_contingency_elements(crac.handle))
+
+  """
+      get_instants(crac::Crac) -> DataFrame
+
+  Return the instants defined in the CRAC (preventive, outage, curative, ...).
+  """
+  get_instants(crac::Crac) = _df(LibPowsybl.get_crac_instants(crac.handle))
+
+  """
+      get_flow_cnecs(crac::Crac) -> DataFrame
+
+  Return the flow CNECs (critical network elements and contingencies) of the CRAC.
+  """
+  get_flow_cnecs(crac::Crac) = _df(LibPowsybl.get_crac_flow_cnecs(crac.handle))
+
+  """
+      get_angle_cnecs(crac::Crac) -> DataFrame
+
+  Return the angle CNECs of the CRAC.
+  """
+  get_angle_cnecs(crac::Crac) = _df(LibPowsybl.get_crac_angle_cnecs(crac.handle))
+
+  """
+      get_voltage_cnecs(crac::Crac) -> DataFrame
+
+  Return the voltage CNECs of the CRAC.
+  """
+  get_voltage_cnecs(crac::Crac) = _df(LibPowsybl.get_crac_voltage_cnecs(crac.handle))
+
+  """
+      get_pst_range_actions(crac::Crac) -> DataFrame
+
+  Return the PST range actions available as remedial actions in the CRAC.
+  """
+  get_pst_range_actions(crac::Crac) = _df(LibPowsybl.get_crac_pst_range_actions(crac.handle))
+
+  """
+      get_hvdc_range_actions(crac::Crac) -> DataFrame
+
+  Return the HVDC range actions of the CRAC.
+  """
+  get_hvdc_range_actions(crac::Crac) = _df(LibPowsybl.get_crac_hvdc_range_actions(crac.handle))
+
+  """
+      get_injection_range_actions(crac::Crac) -> DataFrame
+
+  Return the injection range actions of the CRAC.
+  """
+  get_injection_range_actions(crac::Crac) = _df(LibPowsybl.get_crac_injection_range_actions(crac.handle))
+
+  """
+      get_network_actions(crac::Crac) -> DataFrame
+
+  Return the network (topological) actions available in the CRAC.
+  """
+  get_network_actions(crac::Crac) = _df(LibPowsybl.get_crac_network_actions(crac.handle))
+
   """
       set_loopflow_glsk(rao, glsk)
 

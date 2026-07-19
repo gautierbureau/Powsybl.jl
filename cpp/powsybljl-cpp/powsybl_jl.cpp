@@ -406,4 +406,48 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
   mod.method("get_rao_cost_results", [] (pypowsybl::JavaHandle crac, pypowsybl::JavaHandle result) {
             return pypowsybl::getCostResults(crac, result);
     }, "Get the cost results of a RAO result");
+
+  // ---------------------------------------------------------------------------
+  // CRAC introspection (the contents of a loaded CRAC, as dataframes)
+  // ---------------------------------------------------------------------------
+
+  mod.method("get_crac_contingencies", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracContingencies(crac);
+    }, "Get the contingencies of a CRAC");
+
+  mod.method("get_crac_contingency_elements", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracContingencyElements(crac);
+    }, "Get the network elements of each CRAC contingency");
+
+  mod.method("get_crac_instants", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getInstants(crac);
+    }, "Get the instants defined in a CRAC");
+
+  mod.method("get_crac_flow_cnecs", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getFlowCnecs(crac);
+    }, "Get the flow CNECs of a CRAC");
+
+  mod.method("get_crac_angle_cnecs", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getAngleCnecs(crac);
+    }, "Get the angle CNECs of a CRAC");
+
+  mod.method("get_crac_voltage_cnecs", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getVoltageCnecs(crac);
+    }, "Get the voltage CNECs of a CRAC");
+
+  mod.method("get_crac_pst_range_actions", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracPstRangeActions(crac);
+    }, "Get the PST range actions of a CRAC");
+
+  mod.method("get_crac_hvdc_range_actions", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracHvdcRangeActions(crac);
+    }, "Get the HVDC range actions of a CRAC");
+
+  mod.method("get_crac_injection_range_actions", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracInjectionRangeActions(crac);
+    }, "Get the injection range actions of a CRAC");
+
+  mod.method("get_crac_network_actions", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracNetworkActions(crac);
+    }, "Get the network actions of a CRAC");
 }
