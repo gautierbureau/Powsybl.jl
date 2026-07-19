@@ -80,6 +80,24 @@ end
   @test PowsyblRao.range_action(result, "pst-range-action").tap == open_pst[1, "optimized_tap"]
 end
 
+@testset "Deploy optimized solution to the network" begin
+  network = Powsybl.Network.load(joinpath(DATA, "rao_network.uct"))
+  crac = RAO.load_crac(network, joinpath(DATA, "rao_crac.json"))
+
+  result = PowsyblRao.solve_preventive(network, crac)
+  @test PowsyblRao.is_secure(result)   # optimized margin is positive on this fixture
+
+  # Deploy the plan; the network is now at the optimized tap
+  PowsyblRao.apply!(network, crac, result)
+  ptc = Powsybl.Network.get_phase_tap_changers(network, true)
+  @test ptc[ptc.id .== "BBE2AA1  BBE3AA1  1", :tap][1] == PowsyblRao.range_action(result, "PRA_PST_BE").tap
+
+  # The deployed network actually achieves the predicted minimum margin: re-solving now sees
+  # the deployed tap as its initial state, whose margin must equal the earlier optimum.
+  redo = PowsyblRao.solve_preventive(network, crac)
+  @test redo.initial_min_margin ≈ result.min_margin atol = 1.0
+end
+
 @testset "Injection (redispatching) range action vs OpenRAO" begin
   network = Powsybl.Network.load(joinpath(DATA, "2nodes.uct"))
   crac = RAO.load_crac(network, joinpath(DATA, "crac-simple-rd-mw.json"))

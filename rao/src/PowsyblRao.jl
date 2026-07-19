@@ -284,4 +284,31 @@ module PowsyblRao
                                      ra.kind == :pst ? tap_of[ra.id] : nothing) for ra in ras]
     return Solution(solutions, min_margin, initial_min_margin, margins, binding, iterations, status)
   end
+
+  """
+      is_secure(solution) -> Bool
+
+  Whether the optimized operating point is secure, i.e. every CNEC has a non-negative margin.
+  """
+  is_secure(solution::Solution) = solution.min_margin >= 0
+
+  """
+      apply!(network, crac, solution) -> network
+
+  Deploy the optimized range actions of `solution` onto `network`: set each PST range action
+  to its optimized tap. After this the network is at the optimized operating point (in
+  contrast to [`solve_preventive`](@ref), which restores it).
+
+  Only PST range actions are deployed; deploying injection/HVDC range actions (which shift
+  set points rather than a discrete tap) is not yet supported.
+  """
+  function apply!(network::Powsybl.Network.NetworkHandle, crac::Powsybl.RAO.Crac, solution::Solution)
+    psts = RAO.get_pst_range_actions(crac)
+    pst_element = Dict(String(row.id) => String(row.network_element_id) for row in DataFrames.eachrow(psts))
+    for ra in solution.range_actions
+      ra.kind == :pst || error("PowsyblRao.apply!: deploying $(ra.kind) range actions is not yet supported")
+      _apply_tap(network, pst_element[ra.id], ra.tap)
+    end
+    return network
+  end
 end
