@@ -312,4 +312,58 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
   mod.method("create_loadflow_provider_parameters_series_array", [] (const std::string& provider) {
             return pypowsybl::createLoadFlowProviderParametersSeriesArray(provider);
     }, "Create a parameters series array for a given loadflow provider");
+
+  // ---------------------------------------------------------------------------
+  // Flow decomposition
+  // ---------------------------------------------------------------------------
+
+  // Default providers of extra monitored elements (XNECs).
+  mod.add_bits<pypowsybl::DefaultXnecProvider>("DefaultXnecProvider", jlcxx::julia_type("CppEnum"));
+  mod.set_const("XNEC_GT_5_PERC_ZONE_TO_ZONE_PTDF", pypowsybl::DefaultXnecProvider::GT_5_PERC_ZONE_TO_ZONE_PTDF);
+  mod.set_const("XNEC_ALL_BRANCHES", pypowsybl::DefaultXnecProvider::ALL_BRANCHES);
+  mod.set_const("XNEC_INTERCONNECTIONS", pypowsybl::DefaultXnecProvider::INTERCONNECTIONS);
+
+  // How decomposed flows are rescaled onto the reference AC flow.
+  mod.add_bits<pypowsybl::RescaleMode>("RescaleMode", jlcxx::julia_type("CppEnum"));
+  mod.set_const("RESCALE_NONE", pypowsybl::RescaleMode::NONE);
+  mod.set_const("RESCALE_ACER_METHODOLOGY", pypowsybl::RescaleMode::ACER_METHODOLOGY);
+  mod.set_const("RESCALE_PROPORTIONAL", pypowsybl::RescaleMode::PROPORTIONAL);
+  mod.set_const("RESCALE_MAX_CURRENT_OVERLOAD", pypowsybl::RescaleMode::MAX_CURRENT_OVERLOAD);
+
+  CustomMapper<pypowsybl::FlowDecompositionParameters> fdParametersMapper(mod, "FlowDecompositionParameters");
+  fdParametersMapper.jlcxx_wrapper()
+     .constructor([] () {
+       return pypowsybl::createFlowDecompositionParameters();
+    });
+  fdParametersMapper
+    .method_readwrite("enable_losses_compensation", &pypowsybl::FlowDecompositionParameters::enable_losses_compensation)
+    .method_readwrite("losses_compensation_epsilon", &pypowsybl::FlowDecompositionParameters::losses_compensation_epsilon)
+    .method_readwrite("sensitivity_epsilon", &pypowsybl::FlowDecompositionParameters::sensitivity_epsilon)
+    .method_readwrite("rescale_mode", &pypowsybl::FlowDecompositionParameters::rescale_mode)
+    .method_readwrite("dc_fallback_enabled_after_ac_divergence", &pypowsybl::FlowDecompositionParameters::dc_fallback_enabled_after_ac_divergence)
+    .method_readwrite("sensitivity_variable_batch_size", &pypowsybl::FlowDecompositionParameters::sensitivity_variable_batch_size);
+
+  mod.method("create_flow_decomposition", [] () {
+            return pypowsybl::createFlowDecomposition();
+    }, "Create a flow decomposition context");
+
+  mod.method("add_contingency_for_flow_decomposition", [] (const pypowsybl::JavaHandle& context, const std::string& contingencyId, const std::vector<std::string>& elementsIds) {
+            pypowsybl::addContingencyForFlowDecomposition(context, contingencyId, elementsIds);
+    }, "Add a contingency to a flow decomposition context");
+
+  mod.method("add_precontingency_monitored_elements_for_flow_decomposition", [] (const pypowsybl::JavaHandle& context, const std::vector<std::string>& branchIds) {
+            pypowsybl::addPrecontingencyMonitoredElementsForFlowDecomposition(context, branchIds);
+    }, "Add pre-contingency monitored elements to a flow decomposition context");
+
+  mod.method("add_postcontingency_monitored_elements_for_flow_decomposition", [] (const pypowsybl::JavaHandle& context, const std::vector<std::string>& branchIds, const std::vector<std::string>& contingencyIds) {
+            pypowsybl::addPostcontingencyMonitoredElementsForFlowDecomposition(context, branchIds, contingencyIds);
+    }, "Add post-contingency monitored elements to a flow decomposition context");
+
+  mod.method("add_additional_xnec_provider_for_flow_decomposition", [] (const pypowsybl::JavaHandle& context, pypowsybl::DefaultXnecProvider provider) {
+            pypowsybl::addAdditionalXnecProviderForFlowDecomposition(context, provider);
+    }, "Add an additional default XNEC provider to a flow decomposition context");
+
+  mod.method("run_flow_decomposition", [] (const pypowsybl::JavaHandle& context, const pypowsybl::JavaHandle& network, const pypowsybl::FlowDecompositionParameters& fdParameters, const pypowsybl::LoadFlowParameters& lfParameters) {
+            return pypowsybl::runFlowDecomposition(context, network, fdParameters, lfParameters);
+    }, "Run the flow decomposition and return the decomposed flows as a series array");
 }
