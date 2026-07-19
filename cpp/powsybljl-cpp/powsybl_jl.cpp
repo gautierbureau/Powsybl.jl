@@ -19,6 +19,7 @@ template <> struct jlcxx::IsMirroredType<series> : std::false_type {};
 template <> struct jlcxx::IsMirroredType<network_metadata> : std::false_type {};
 template <> struct jlcxx::IsMirroredType<loadflow_component_result> : std::false_type {};
 template <> struct jlcxx::IsMirroredType<slack_bus_result> : std::false_type {};
+template <> struct jlcxx::IsMirroredType<matrix> : std::false_type {};
 
 using StringStringMap = std::map<std::string, std::string>;
 
@@ -548,4 +549,88 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
   mod.method("get_rao_virtual_cost_results", [] (pypowsybl::JavaHandle crac, pypowsybl::JavaHandle result, std::string const& name) {
             return pypowsybl::getVirtualCostsResults(crac, result, name);
     }, "Get the per-CNEC results for a named virtual cost of a RAO result");
+  // Sensitivity analysis
+  // ===========================================================================
+
+  // A dense matrix (row-major) returned by the sensitivity result getters.
+  mod.add_type<matrix>("PowsyblMatrix")
+          .method("row_count", [](const matrix& m) { return m.row_count; })
+          .method("column_count", [](const matrix& m) { return m.column_count; })
+          .method("matrix_values", [](matrix& m) {
+             return jlcxx::ArrayRef<double,1>(m.values, m.row_count * m.column_count);
+          });
+
+  mod.method("create_sensitivity_analysis", [] () {
+            return pypowsybl::createSensitivityAnalysis();
+    }, "Create a sensitivity analysis context");
+
+  mod.method("add_sensitivity_contingency", [] (pypowsybl::JavaHandle analysisContext, std::string const& contingencyId,
+                                                std::vector<std::string> const& elementsIds) {
+            pypowsybl::addContingency(analysisContext, contingencyId, elementsIds);
+    }, "Add a contingency to a sensitivity analysis context");
+
+  // Contingency context / function / variable types are passed as ints and cast to the
+  // corresponding C enums, so this binding stays independent of other analysis modules.
+  mod.method("add_factor_matrix", [] (pypowsybl::JavaHandle analysisContext, std::string matrixId,
+                                      std::vector<std::string> const& branchesIds,
+                                      std::vector<std::string> const& variablesIds,
+                                      std::vector<std::string> const& contingenciesIds,
+                                      int contingencyContextType, int sensitivityFunctionType, int sensitivityVariableType) {
+            pypowsybl::addFactorMatrix(analysisContext, matrixId, branchesIds, variablesIds, contingenciesIds,
+                                       static_cast<contingency_context_type>(contingencyContextType),
+                                       static_cast<sensitivity_function_type>(sensitivityFunctionType),
+                                       static_cast<sensitivity_variable_type>(sensitivityVariableType));
+    }, "Add a factor matrix to a sensitivity analysis context");
+
+  // Define GLSK-like zones (weighted sets of injections) usable as variable ids in a
+  // factor matrix. The zones are described by flattened parallel arrays so only basic
+  // vectors cross the CxxWrap boundary: zoneIds[z] owns zoneLengths[z] consecutive
+  // entries of injectionIds / shiftKeys.
+  mod.method("set_zones", [] (pypowsybl::JavaHandle analysisContext,
+                              std::vector<std::string> const& zoneIds,
+                              std::vector<std::string> const& injectionIds,
+                              std::vector<double> const& shiftKeys,
+                              std::vector<int> const& zoneLengths) {
+            std::vector<::zone*> zones;
+            zones.reserve(zoneIds.size());
+            int offset = 0;
+            for (size_t z = 0; z < zoneIds.size(); ++z) {
+              int len = zoneLengths[z];
+              std::vector<std::string> injs(injectionIds.begin() + offset, injectionIds.begin() + offset + len);
+              std::vector<double> keys(shiftKeys.begin() + offset, shiftKeys.begin() + offset + len);
+              zones.push_back(pypowsybl::createZone(zoneIds[z], injs, keys));
+              offset += len;
+            }
+            pypowsybl::setZones(analysisContext, zones);
+            // powsybl-cpp exposes no zone destructor; setZones copies the data into the
+            // Java context, so the transient structs are left for process teardown.
+    }, "Set the GLSK-like zones of a sensitivity analysis context");
+
+  mod.method("run_sensitivity_analysis", [] (pypowsybl::JavaHandle analysisContext, pypowsybl::JavaHandle network,
+                                             bool dc, const pypowsybl::LoadFlowParameters& loadflowParameters,
+                                             std::string const& provider) {
+            std::shared_ptr<pypowsybl::SensitivityAnalysisParameters> parameters(pypowsybl::createSensitivityAnalysisParameters());
+            parameters->loadflow_parameters = loadflowParameters;
+            return pypowsybl::runSensitivityAnalysis(analysisContext, network, dc, *parameters, provider, nullptr);
+    }, "Run a sensitivity analysis");
+
+  mod.method("run_sensitivity_analysis_report", [] (pypowsybl::JavaHandle analysisContext, pypowsybl::JavaHandle network,
+                                                    bool dc, const pypowsybl::LoadFlowParameters& loadflowParameters,
+                                                    std::string const& provider, pypowsybl::JavaHandle reportNode) {
+            std::shared_ptr<pypowsybl::SensitivityAnalysisParameters> parameters(pypowsybl::createSensitivityAnalysisParameters());
+            parameters->loadflow_parameters = loadflowParameters;
+            return pypowsybl::runSensitivityAnalysis(analysisContext, network, dc, *parameters, provider, &reportNode);
+    }, "Run a sensitivity analysis, collecting logs into a report node");
+
+  mod.method("get_sensitivity_matrix", [] (pypowsybl::JavaHandle result, std::string const& matrixId, std::string const& contingencyId) {
+            return pypowsybl::getSensitivityMatrix(result, matrixId, contingencyId);
+    }, "Get the sensitivity values matrix of a factor matrix for a given contingency");
+
+  mod.method("get_reference_matrix", [] (pypowsybl::JavaHandle result, std::string const& matrixId, std::string const& contingencyId) {
+            return pypowsybl::getReferenceMatrix(result, matrixId, contingencyId);
+    }, "Get the reference (function) values matrix of a factor matrix for a given contingency");
+
+  mod.method("get_sensitivity_analysis_provider_names", [] () {
+            return pypowsybl::getSensitivityAnalysisProviderNames();
+    }, "Get the names of the available sensitivity analysis providers");
 }
