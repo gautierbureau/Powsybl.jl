@@ -6,6 +6,7 @@
 
 using Powsybl
 using Test
+using Dates
 
 # To avoid reading potential user specific configuration
 Powsybl.LibPowsybl.set_config_read(false)
@@ -892,4 +893,32 @@ end
   ctx3 = FD.create()
   FD.add_all_branches_as_monitored_elements(ctx3)
   @test size(FD.run(ctx3, fresh; parameters = edited), 1) == 18
+end
+@testset "Test GLSK document" begin
+  GLSK = Powsybl.GLSK
+  network = Powsybl.Network.load("data/simple-eu.uct")
+  doc = GLSK.load("data/glsk_sample.xml")
+
+  @test GLSK.get_countries(doc) == ["10YFR-RTE------C", "10YNL----------L", "10YBE----------2", "10YCB-GERMANY--8"]
+
+  # The document is valid over a one-day interval
+  t = GLSK.get_gsk_time_interval_start(doc)
+  @test t == DateTime(2019, 1, 7, 23, 0, 0)
+  @test GLSK.get_gsk_time_interval_end(doc) == DateTime(2019, 1, 8, 23, 0, 0)
+
+  # A zone resolves to its participating generators and their (normalized) shift keys
+  @test GLSK.get_points_for_country(doc, network, "10YFR-RTE------C", t) ==
+        ["FFR1AA1 _generator", "FFR2AA1 _generator", "FFR3AA1 _generator"]
+  fr_factors = GLSK.get_glsk_factors(doc, network, "10YFR-RTE------C", t)
+  @test fr_factors ≈ [0.2857142984867096, 0.2857142984867096, 0.4285714328289032]
+  @test sum(fr_factors) ≈ 1.0 atol = 1e-6   # factors carry single-precision weights
+
+  # A different zone resolves to its own generators and shift keys
+  @test GLSK.get_points_for_country(doc, network, "10YCB-GERMANY--8", t) ==
+        ["DDE1AA1 _generator", "DDE2AA1 _generator", "DDE3AA1 _generator"]
+  @test GLSK.get_glsk_factors(doc, network, "10YCB-GERMANY--8", t) ≈ [0.4166666567325592, 0.3333333432674408, 0.25]
+
+  # The instant may also be passed as epoch seconds
+  @test GLSK.get_points_for_country(doc, network, "10YFR-RTE------C", round(Int, datetime2unix(t))) ==
+        ["FFR1AA1 _generator", "FFR2AA1 _generator", "FFR3AA1 _generator"]
 end

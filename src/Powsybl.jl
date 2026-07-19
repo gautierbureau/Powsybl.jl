@@ -26,4 +26,5 @@ module Powsybl
   include("Diagram.jl")
   include("RAO.jl")
   include("FlowDecomposition.jl")
+  include("GLSK.jl")
 end
