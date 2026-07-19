@@ -125,6 +125,63 @@ module SensitivityAnalysis
   end
 
   """
+  A GLSK-like zone: a named, weighted set of injections (generators or loads). Once
+  registered on a context with [`set_zones`](@ref), a zone's `id` can be used as a
+  variable id in [`add_factor_matrix`](@ref) to compute the sensitivity of a monitored
+  quantity to a shift distributed over the zone's injections according to their keys.
+  """
+  struct Zone
+    id::String
+    shift_keys_by_injection::Dict{String, Float64}
+  end
+
+  """
+      create_zone(id, shift_keys_by_injection) -> Zone
+      create_zone(id, injection_ids[, shift_keys]) -> Zone
+
+  Build a [`Zone`](@ref) from either a `Dict` mapping injection id to shift key, or a
+  vector of injection ids with an optional matching vector of shift keys (defaulting to
+  a uniform key of `1.0` per injection).
+  """
+  function create_zone(id::String, shift_keys_by_injection::AbstractDict)
+    return Zone(id, Dict{String, Float64}(String(k) => Float64(v) for (k, v) in shift_keys_by_injection))
+  end
+
+  function create_zone(id::String, injection_ids::Vector{String},
+                       shift_keys::Vector{<:Real} = ones(Float64, length(injection_ids)))
+    length(injection_ids) == length(shift_keys) ||
+      throw(ArgumentError("injection_ids and shift_keys must have the same length"))
+    return Zone(id, Dict{String, Float64}(zip(injection_ids, Float64.(shift_keys))))
+  end
+
+  """
+      set_zones(analysis, zones)
+
+  Register the given [`Zone`](@ref)s on the analysis context. Their ids then become
+  usable as variable ids in [`add_factor_matrix`](@ref) / [`set_branch_flow_factor_matrix`](@ref).
+  """
+  function set_zones(analysis::SensitivityAnalysisContext, zones::Vector{Zone})
+    zone_ids = String[]
+    injection_ids = String[]
+    shift_keys = Float64[]
+    zone_lengths = Int32[]
+    for zone in zones
+      push!(zone_ids, zone.id)
+      push!(zone_lengths, Int32(length(zone.shift_keys_by_injection)))
+      for (injection_id, key) in zone.shift_keys_by_injection
+        push!(injection_ids, injection_id)
+        push!(shift_keys, key)
+      end
+    end
+    LibPowsybl.set_zones(analysis.handle,
+                         StdVector{StdString}(zone_ids),
+                         StdVector{StdString}(injection_ids),
+                         StdVector{Float64}(shift_keys),
+                         StdVector{Cint}(zone_lengths))
+    return nothing
+  end
+
+  """
       set_branch_flow_factor_matrix(analysis, branch_ids, variable_ids; matrix_id = "default")
 
   Convenience helper registering a branch active power (side 1) factor matrix — the most
