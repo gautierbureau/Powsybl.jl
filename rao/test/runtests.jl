@@ -21,6 +21,11 @@ const DATA = joinpath(@__DIR__, "..", "..", "test", "data", "rao")
 
   result = PowsyblRao.solve_preventive(network, crac)
 
+  # solve_preventive is a pure query: the network tap is restored (checked before OpenRAO's
+  # run below, which does apply the optimized action to the network)
+  ptc0 = Powsybl.Network.get_phase_tap_changers(network, true)
+  @test ptc0[ptc0.id .== result.pst_id, :tap][1] == 0
+
   # The LP is solved to optimality
   @test string(result.termination) == "OPTIMAL"
   @test result.range_action_id == "PRA_PST_BE"
@@ -46,4 +51,24 @@ const DATA = joinpath(@__DIR__, "..", "..", "test", "data", "rao")
   cost = RAO.get_cost_results(openrao)
   preventive_cost = cost[cost.optimized_instant .== "preventive", "functional_cost"][1]
   @test result.min_margin ≈ -preventive_cost atol = 1.0
+
+  # The SLP loop converges (DC model is exact, so a single iteration reaches the fixed point)
+  @test result.iterations >= 1
+end
+
+@testset "Discrete MILP, continuous LP and penalty" begin
+  network = Powsybl.Network.load(joinpath(DATA, "rao_network.uct"))
+  crac = RAO.load_crac(network, joinpath(DATA, "rao_crac.json"))
+
+  # Discrete MILP and continuous-then-rounded LP agree here (optimum sits on a tap)
+  milp = PowsyblRao.solve_preventive(network, crac; discrete = true)
+  lp = PowsyblRao.solve_preventive(network, crac; discrete = false)
+  @test milp.optimized_tap == -16
+  @test lp.optimized_tap == -16
+  @test milp.min_margin ≈ lp.min_margin atol = 1e-6
+
+  # A large movement penalty makes moving the PST not worth it: stay at the initial tap
+  penalized = PowsyblRao.solve_preventive(network, crac; pst_penalty = 1.0e6)
+  @test penalized.optimized_tap == 0
+  @test penalized.min_margin ≈ penalized.initial_min_margin atol = 1e-6
 end
