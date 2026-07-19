@@ -7,21 +7,25 @@
 using BinaryBuilder, Pkg
 
 name = "Powsybl"
-version = v"0.3.0"
+version = v"0.4.0"
 
-pypowsybl_version = v"1.14.0"
+pypowsybl_version = v"1.15.0"
 
 sources = [
     DirectorySource("./cpp", target="cpp"),
-    GitSource("https://github.com/powsybl/pypowsybl.git", "342fb354a7c9f9bdfdec66d5901005293848d64b", "cpp"),
+    # pypowsybl v1.15.0 (git tag v1.15.0). Adds, among other things, CRAC introspection.
+    GitSource("https://github.com/powsybl/pypowsybl.git", "5d246382efcc24edf568ffd4577c53fe4508bee3", "cpp"),
+    # NOTE: sha256 checksums below are for the official v1.15.0 release archives.
+    # Fill them in from the published archives (BinaryBuilder prints the real hash on a
+    # checksum mismatch during the first build if these placeholders are left in place).
     ArchiveSource("https://github.com/powsybl/pypowsybl/releases/download/v$(pypowsybl_version)/binaries-v$(pypowsybl_version)-windows.zip",
-                  "4b4a8c1b2bc9a210902773bda3f14a4131e48fb54a453857164c7d90fa8114e3",
+                  "0000000000000000000000000000000000000000000000000000000000000000",
                   "powsybl-java-windows"),
     ArchiveSource("https://github.com/powsybl/pypowsybl/releases/download/v$(pypowsybl_version)/binaries-v$(pypowsybl_version)-linux.zip",
-                  "0edba1422152bd3c8fe17f5fa79ecdfbb2ab7a96391941c5d74bfdaf4075b108",
+                  "0000000000000000000000000000000000000000000000000000000000000000",
                   "powsybl-java-linux"),
     ArchiveSource("https://github.com/powsybl/pypowsybl/releases/download/v$(pypowsybl_version)/binaries-v$(pypowsybl_version)-darwin.zip",
-                  "ce3a9254fabce9dec84ca4c39aaa1879e1b26bde12c403f3b9c10c443ce6d7a0",
+                  "0000000000000000000000000000000000000000000000000000000000000000",
                   "powsybl-java-darwin")
 ]
 

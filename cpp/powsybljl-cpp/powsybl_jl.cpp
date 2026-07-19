@@ -10,15 +10,105 @@
 #include <memory>
 #include <iostream>
 #include <thread>
+#include <list>
+#include <vector>
 
 #include "jlcxx/jlcxx.hpp"
 #include "powsybl-cpp.h"
+
+// Accumulates typed columns and exposes them as a C `dataframe` for element
+// creation/update. Owns all the column storage so the pointers held by the C
+// series stay valid for the duration of the (synchronous) Java call.
+class ElementDataframe {
+public:
+    void add_string_series(const std::string& name, bool index, const std::vector<std::string>& values) {
+        names_.push_back(name);
+        stringData_.push_back(values);
+        std::vector<std::string>& stored = stringData_.back();
+        stringPtrs_.emplace_back();
+        std::vector<char*>& ptrs = stringPtrs_.back();
+        ptrs.reserve(stored.size());
+        for (std::string& s : stored) { ptrs.push_back(const_cast<char*>(s.c_str())); }
+        appendSeries(index, 0, ptrs.data(), (int) ptrs.size());
+    }
+    void add_double_series(const std::string& name, bool index, const std::vector<double>& values) {
+        names_.push_back(name);
+        doubleData_.push_back(values);
+        appendSeries(index, 1, doubleData_.back().data(), (int) doubleData_.back().size());
+    }
+    void add_int_series(const std::string& name, bool index, const std::vector<int>& values) {
+        names_.push_back(name);
+        intData_.push_back(values);
+        appendSeries(index, 2, intData_.back().data(), (int) intData_.back().size());
+    }
+    void add_bool_series(const std::string& name, bool index, const std::vector<int>& values) {
+        // Boolean series are marshalled as 4-byte ints (0/1), exactly like int
+        // series: the Java side reads type 2 and 3 from an int* buffer.
+        names_.push_back(name);
+        intData_.push_back(values);
+        appendSeries(index, 3, intData_.back().data(), (int) intData_.back().size());
+    }
+    // Close the current dataframe and start a new one. Used to build the several
+    // dataframes some element types need at creation (e.g. a shunt compensator plus
+    // its linear/non-linear sections, or a tap changer plus its steps).
+    void finish_dataframe() {
+        frames_.push_back(current_);
+        current_.clear();
+    }
+    // Single dataframe (the columns added since the last finish_dataframe). Used for
+    // updates and single-dataframe extension creation.
+    dataframe build_dataframe() {
+        return makeDataframe(current_);
+    }
+    // All the dataframes to create an element: the finished frames, or the current one
+    // when finish_dataframe was never called (the single-dataframe case).
+    std::vector<dataframe> build_dataframes() {
+        std::vector<dataframe> result;
+        if (!frames_.empty()) {
+            for (std::vector<series>& frame : frames_) {
+                result.push_back(makeDataframe(frame));
+            }
+        } else {
+            result.push_back(makeDataframe(current_));
+        }
+        return result;
+    }
+private:
+    // An empty dataframe must still carry a valid (non-null) series pointer, matching
+    // pypowsybl which always allocates the series array even for zero columns; a null
+    // pointer crashes the Java dataframe reader.
+    dataframe makeDataframe(std::vector<series>& frame) {
+        dataframe df;
+        df.series = frame.empty() ? &emptySeries_ : frame.data();
+        df.series_count = (int) frame.size();
+        return df;
+    }
+    void appendSeries(bool index, int type, void* ptr, int length) {
+        series s;
+        s.name = const_cast<char*>(names_.back().c_str());
+        s.index = index ? 1 : 0;
+        s.type = type;
+        s.data.ptr = ptr;
+        s.data.length = length;
+        s.mask = nullptr;
+        current_.push_back(s);
+    }
+    std::list<std::string> names_;
+    std::list<std::vector<std::string>> stringData_;
+    std::list<std::vector<char*>> stringPtrs_;
+    std::list<std::vector<double>> doubleData_;
+    std::list<std::vector<int>> intData_;
+    std::vector<series> current_;
+    std::list<std::vector<series>> frames_;
+    series emptySeries_{};
+};
 
 // Necessary to compile to map struct with no constructor ?
 template <> struct jlcxx::IsMirroredType<series> : std::false_type {};
 template <> struct jlcxx::IsMirroredType<network_metadata> : std::false_type {};
 template <> struct jlcxx::IsMirroredType<loadflow_component_result> : std::false_type {};
 template <> struct jlcxx::IsMirroredType<slack_bus_result> : std::false_type {};
+template <> struct jlcxx::IsMirroredType<matrix> : std::false_type {};
 
 using StringStringMap = std::map<std::string, std::string>;
 
@@ -109,7 +199,9 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
   mod.set_const("SHUNT_COMPENSATOR", element_type::SHUNT_COMPENSATOR);
   mod.set_const("NON_LINEAR_SHUNT_COMPENSATOR_SECTION", element_type::NON_LINEAR_SHUNT_COMPENSATOR_SECTION);
   mod.set_const("LINEAR_SHUNT_COMPENSATOR_SECTION", element_type::LINEAR_SHUNT_COMPENSATOR_SECTION);
-  mod.set_const("DANGLING_LINE", element_type::DANGLING_LINE);
+  // pypowsybl 1.15.0 renamed the DANGLING_LINE element type to BOUNDARY_LINE; keep the
+  // Julia-facing name stable so Network.get_dangling_lines is unchanged.
+  mod.set_const("DANGLING_LINE", element_type::BOUNDARY_LINE);
   mod.set_const("TIE_LINE", element_type::TIE_LINE);
   mod.set_const("LCC_CONVERTER_STATION", element_type::LCC_CONVERTER_STATION);
   mod.set_const("VSC_CONVERTER_STATION", element_type::VSC_CONVERTER_STATION);
@@ -281,11 +373,10 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
              return powsybl_array_to_julia<slack_bus_result>(&(r.slack_bus_results));
           });
 
+  // Since pypowsybl 1.15.0, jlcxx auto-registers a default constructor for
+  // LoadFlowParameters, so we must not also register one here (it would be a double
+  // registration). Provider defaults are obtained through default_loadflow_parameters().
   CustomMapper<pypowsybl::LoadFlowParameters> lfParametersMapper(mod, "LoadFlowParameters");
-  lfParametersMapper.jlcxx_wrapper()
-     .constructor([] () {
-       return pypowsybl::createLoadFlowParameters();
-    });
   lfParametersMapper
     .method_readwrite("voltage_init_mode", &pypowsybl::LoadFlowParameters::voltage_init_mode)
     .method_readwrite("transformer_voltage_control_on", &pypowsybl::LoadFlowParameters::transformer_voltage_control_on)
@@ -304,12 +395,560 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
     .method_readwrite("provider_parameters_keys", &pypowsybl::LoadFlowParameters::provider_parameters_keys)
     .method_readwrite("provider_parameters_values", &pypowsybl::LoadFlowParameters::provider_parameters_values);
 
+  mod.method("default_loadflow_parameters", [] () {
+                std::shared_ptr<pypowsybl::LoadFlowParameters> parameters(pypowsybl::createLoadFlowParameters());
+                return *parameters;
+    }, "Get a LoadFlowParameters filled with the provider defaults");
+
   mod.method("run_load_flow", [] (const pypowsybl::JavaHandle& network, const pypowsybl::LoadFlowParameters& parameters, bool dc, const std::string& provider) {
-                pypowsybl::LoadFlowComponentResultArray* results = pypowsybl::runLoadFlow(network, dc, parameters, provider, nullptr);
+                // Since pypowsybl 1.15.0 the DC flag is carried on the parameters (runLoadFlow
+                // no longer takes a separate dc argument); copy locally to set it.
+                pypowsybl::LoadFlowParameters dcParameters = parameters;
+                dcParameters.dc = dc;
+                pypowsybl::LoadFlowComponentResultArray* results = pypowsybl::runLoadFlow(network, dcParameters, provider, nullptr);
                 return powsybl_array_to_julia(results);
       }, "Run and AC load flow");
 
   mod.method("create_loadflow_provider_parameters_series_array", [] (const std::string& provider) {
             return pypowsybl::createLoadFlowProviderParametersSeriesArray(provider);
     }, "Create a parameters series array for a given loadflow provider");
+
+  // ===========================================================================
+  // RAO (remedial action optimisation, OpenRAO)
+  // ===========================================================================
+
+  // RaoComputationStatus
+  mod.add_bits<RaoComputationStatus>("RaoComputationStatus", jlcxx::julia_type("CppEnum"));
+  mod.set_const("RAO_DEFAULT", RaoComputationStatus::DEFAULT);
+  mod.set_const("RAO_FAILURE", RaoComputationStatus::FAILURE);
+  mod.set_const("RAO_PARTIAL_FAILURE", RaoComputationStatus::PARTIAL_FAILURE);
+
+  mod.method("create_rao", [] () {
+            return pypowsybl::createRao();
+    }, "Create a RAO context");
+
+  // The CRAC / GLSK / parameters are imported from their file content (JSON or XML text),
+  // passed through the same buffered graal entry points pypowsybl feeds from Python buffers.
+  mod.method("load_crac_source", [] (pypowsybl::JavaHandle network, std::string const& cracSource) {
+            return pypowsybl::PowsyblCaller::get()->callJava<pypowsybl::JavaHandle>(
+                ::loadCracBufferedSource, network, (char*) cracSource.data(), (int) cracSource.size());
+    }, "Import a CRAC from its file content against a network");
+
+  mod.method("load_glsk_source", [] (std::string const& glskSource) {
+            return pypowsybl::PowsyblCaller::get()->callJava<pypowsybl::JavaHandle>(
+                ::loadGlskBufferedSource, (char*) glskSource.data(), (int) glskSource.size());
+    }, "Import a GLSK document from its file content");
+
+  mod.method("set_rao_loopflow_glsk", [] (pypowsybl::JavaHandle raoContext, pypowsybl::JavaHandle glsk) {
+            pypowsybl::setLoopFlowGlsk(raoContext, glsk);
+    }, "Set the loop flow GLSK of a RAO context");
+
+  mod.method("set_rao_monitoring_glsk", [] (pypowsybl::JavaHandle raoContext, pypowsybl::JavaHandle glsk) {
+            pypowsybl::setMonitoringGlsk(raoContext, glsk);
+    }, "Set the monitoring GLSK of a RAO context");
+
+  mod.method("run_rao", [] (pypowsybl::JavaHandle network, pypowsybl::JavaHandle crac, pypowsybl::JavaHandle rao,
+                            std::string const& provider) {
+            std::shared_ptr<pypowsybl::RaoParameters> parameters(pypowsybl::createRaoParameters());
+            return pypowsybl::runRaoWithParameters(network, crac, rao, *parameters, provider);
+    }, "Run a RAO with default parameters");
+
+  mod.method("run_rao_with_parameters", [] (pypowsybl::JavaHandle network, pypowsybl::JavaHandle crac, pypowsybl::JavaHandle rao,
+                                            std::string const& parametersSource, std::string const& provider) {
+            std::shared_ptr<rao_parameters> cParameters(pypowsybl::PowsyblCaller::get()->callJava<rao_parameters*>(
+                ::loadRaoParameters, (char*) parametersSource.data(), (int) parametersSource.size()));
+            pypowsybl::RaoParameters parameters(cParameters.get());
+            return pypowsybl::runRaoWithParameters(network, crac, rao, parameters, provider);
+    }, "Run a RAO with parameters loaded from a JSON parameters file content");
+
+  mod.method("get_rao_result_status", [] (pypowsybl::JavaHandle result) {
+            return pypowsybl::getRaoResultStatus(result);
+    }, "Get the global status of a RAO result");
+
+  mod.method("get_rao_flow_cnec_results", [] (pypowsybl::JavaHandle crac, pypowsybl::JavaHandle result) {
+            return pypowsybl::getFlowCnecResults(crac, result);
+    }, "Get the flow CNEC results of a RAO result");
+
+  mod.method("get_rao_angle_cnec_results", [] (pypowsybl::JavaHandle crac, pypowsybl::JavaHandle result) {
+            return pypowsybl::getAngleCnecResults(crac, result);
+    }, "Get the angle CNEC results of a RAO result");
+
+  mod.method("get_rao_voltage_cnec_results", [] (pypowsybl::JavaHandle crac, pypowsybl::JavaHandle result) {
+            return pypowsybl::getVoltageCnecResults(crac, result);
+    }, "Get the voltage CNEC results of a RAO result");
+
+  mod.method("get_rao_remedial_action_results", [] (pypowsybl::JavaHandle crac, pypowsybl::JavaHandle result) {
+            return pypowsybl::getRemedialActionResults(crac, result);
+    }, "Get the remedial action results of a RAO result");
+
+  mod.method("get_rao_network_action_results", [] (pypowsybl::JavaHandle crac, pypowsybl::JavaHandle result) {
+            return pypowsybl::getNetworkActionResults(crac, result);
+    }, "Get the network action results of a RAO result");
+
+  mod.method("get_rao_pst_range_action_results", [] (pypowsybl::JavaHandle crac, pypowsybl::JavaHandle result) {
+            return pypowsybl::getPstRangeActionResults(crac, result);
+    }, "Get the PST range action results of a RAO result");
+
+  mod.method("get_rao_range_action_results", [] (pypowsybl::JavaHandle crac, pypowsybl::JavaHandle result) {
+            return pypowsybl::getRangeActionResults(crac, result);
+    }, "Get the range action results of a RAO result");
+
+  mod.method("get_rao_cost_results", [] (pypowsybl::JavaHandle crac, pypowsybl::JavaHandle result) {
+            return pypowsybl::getCostResults(crac, result);
+    }, "Get the cost results of a RAO result");
+
+  // ---------------------------------------------------------------------------
+  // CRAC introspection (the contents of a loaded CRAC, as dataframes)
+  // ---------------------------------------------------------------------------
+
+  mod.method("get_crac_contingencies", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracContingencies(crac);
+    }, "Get the contingencies of a CRAC");
+
+  mod.method("get_crac_contingency_elements", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracContingencyElements(crac);
+    }, "Get the network elements of each CRAC contingency");
+
+  mod.method("get_crac_instants", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getInstants(crac);
+    }, "Get the instants defined in a CRAC");
+
+  mod.method("get_crac_flow_cnecs", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getFlowCnecs(crac);
+    }, "Get the flow CNECs of a CRAC");
+
+  mod.method("get_crac_angle_cnecs", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getAngleCnecs(crac);
+    }, "Get the angle CNECs of a CRAC");
+
+  mod.method("get_crac_voltage_cnecs", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getVoltageCnecs(crac);
+    }, "Get the voltage CNECs of a CRAC");
+
+  mod.method("get_crac_pst_range_actions", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracPstRangeActions(crac);
+    }, "Get the PST range actions of a CRAC");
+
+  mod.method("get_crac_hvdc_range_actions", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracHvdcRangeActions(crac);
+    }, "Get the HVDC range actions of a CRAC");
+
+  mod.method("get_crac_injection_range_actions", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracInjectionRangeActions(crac);
+    }, "Get the injection range actions of a CRAC");
+
+  mod.method("get_crac_network_actions", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracNetworkActions(crac);
+    }, "Get the network actions of a CRAC");
+
+  mod.method("get_crac_thresholds", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getThresholds(crac);
+    }, "Get the thresholds of the CNECs of a CRAC");
+
+  mod.method("get_crac_range_action_ranges", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracRangeActionRanges(crac);
+    }, "Get the ranges of the range actions of a CRAC");
+
+  mod.method("get_crac_counter_trade_range_actions", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracCounterTradeRangeActions(crac);
+    }, "Get the counter trade range actions of a CRAC");
+
+  mod.method("get_crac_terminal_connection_actions", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracTerminalConnectionActions(crac);
+    }, "Get the terminal connection (elementary) actions of a CRAC");
+
+  mod.method("get_crac_pst_tap_position_actions", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracPstTapPositionActions(crac);
+    }, "Get the PST tap position (elementary) actions of a CRAC");
+
+  mod.method("get_crac_generator_actions", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracGeneratorActions(crac);
+    }, "Get the generator (elementary) actions of a CRAC");
+
+  mod.method("get_crac_load_actions", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracLoadActions(crac);
+    }, "Get the load (elementary) actions of a CRAC");
+
+  mod.method("get_crac_boundary_line_actions", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracBoundaryLineActions(crac);
+    }, "Get the boundary line (elementary) actions of a CRAC");
+
+  mod.method("get_crac_shunt_compensator_position_actions", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracShuntCompensatorPositionActions(crac);
+    }, "Get the shunt compensator position (elementary) actions of a CRAC");
+
+  mod.method("get_crac_switch_actions", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracSwitchActions(crac);
+    }, "Get the switch (elementary) actions of a CRAC");
+
+  mod.method("get_crac_switch_pairs", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getCracSwitchPairs(crac);
+    }, "Get the switch pair (elementary) actions of a CRAC");
+
+  mod.method("get_crac_network_element_ids_and_keys", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getNetworkElementIdsAndKeys(crac);
+    }, "Get the network elements referenced by a CRAC and their keys");
+
+  // Usage rules: the conditions under which each remedial action may be applied.
+  mod.method("get_crac_on_instant_usage_rules", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getOnInstantUsageRules(crac);
+    }, "Get the OnInstant usage rules of a CRAC");
+
+  mod.method("get_crac_on_contingency_state_usage_rules", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getOnContingencyStateUsageRules(crac);
+    }, "Get the OnContingencyState usage rules of a CRAC");
+
+  mod.method("get_crac_on_constraint_usage_rules", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getOnConstraintUsageRules(crac);
+    }, "Get the OnConstraint usage rules of a CRAC");
+
+  mod.method("get_crac_on_flow_constraint_in_country_usage_rules", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getOnFlowConstraintInCountryUsageRules(crac);
+    }, "Get the OnFlowConstraintInCountry usage rules of a CRAC");
+
+  // Usage limits: the caps on how many remedial actions may be applied (globally / per TSO).
+  mod.method("get_crac_max_remedial_actions_usage_limits", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getMaxRemedialActionsUsageLimits(crac);
+    }, "Get the maximum remedial actions usage limits of a CRAC");
+
+  mod.method("get_crac_max_topological_actions_per_tso_usage_limits", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getMaxTopologicalActionsPerTsoUsageLimits(crac);
+    }, "Get the maximum topological actions per TSO usage limits of a CRAC");
+
+  mod.method("get_crac_max_pst_actions_per_tso_usage_limits", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getMaxPstActionsPerTsoUsageLimits(crac);
+    }, "Get the maximum PST actions per TSO usage limits of a CRAC");
+
+  mod.method("get_crac_max_remedial_actions_per_tso_usage_limits", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getMaxRemedialActionsPerTsoUsageLimits(crac);
+    }, "Get the maximum remedial actions per TSO usage limits of a CRAC");
+
+  mod.method("get_crac_max_elementary_actions_per_tso_usage_limits", [] (pypowsybl::JavaHandle crac) {
+            return pypowsybl::getMaxElementaryActionsPerTsoUsageLimits(crac);
+    }, "Get the maximum elementary actions per TSO usage limits of a CRAC");
+
+  // ---------------------------------------------------------------------------
+  // RAO result: virtual costs (per named virtual-cost contributor)
+  // ---------------------------------------------------------------------------
+
+  mod.method("get_rao_virtual_cost_names", [] (pypowsybl::JavaHandle result) {
+            return pypowsybl::getVirtualCostNames(result);
+    }, "Get the names of the virtual costs tracked by a RAO result");
+
+  mod.method("get_rao_virtual_cost_results", [] (pypowsybl::JavaHandle crac, pypowsybl::JavaHandle result, std::string const& name) {
+            return pypowsybl::getVirtualCostsResults(crac, result, name);
+    }, "Get the per-CNEC results for a named virtual cost of a RAO result");
+  // Sensitivity analysis
+  // ===========================================================================
+
+  // A dense matrix (row-major) returned by the sensitivity result getters.
+  mod.add_type<matrix>("PowsyblMatrix")
+          .method("row_count", [](const matrix& m) { return m.row_count; })
+          .method("column_count", [](const matrix& m) { return m.column_count; })
+          .method("matrix_values", [](matrix& m) {
+             return jlcxx::ArrayRef<double,1>(m.values, m.row_count * m.column_count);
+          });
+
+  mod.method("create_sensitivity_analysis", [] () {
+            return pypowsybl::createSensitivityAnalysis();
+    }, "Create a sensitivity analysis context");
+
+  mod.method("add_sensitivity_contingency", [] (pypowsybl::JavaHandle analysisContext, std::string const& contingencyId,
+                                                std::vector<std::string> const& elementsIds) {
+            pypowsybl::addContingency(analysisContext, contingencyId, elementsIds);
+    }, "Add a contingency to a sensitivity analysis context");
+
+  // Contingency context / function / variable types are passed as ints and cast to the
+  // corresponding C enums, so this binding stays independent of other analysis modules.
+  mod.method("add_factor_matrix", [] (pypowsybl::JavaHandle analysisContext, std::string matrixId,
+                                      std::vector<std::string> const& branchesIds,
+                                      std::vector<std::string> const& variablesIds,
+                                      std::vector<std::string> const& contingenciesIds,
+                                      int contingencyContextType, int sensitivityFunctionType, int sensitivityVariableType) {
+            pypowsybl::addFactorMatrix(analysisContext, matrixId, branchesIds, variablesIds, contingenciesIds,
+                                       static_cast<contingency_context_type>(contingencyContextType),
+                                       static_cast<sensitivity_function_type>(sensitivityFunctionType),
+                                       static_cast<sensitivity_variable_type>(sensitivityVariableType));
+    }, "Add a factor matrix to a sensitivity analysis context");
+
+  // Define GLSK-like zones (weighted sets of injections) usable as variable ids in a
+  // factor matrix. The zones are described by flattened parallel arrays so only basic
+  // vectors cross the CxxWrap boundary: zoneIds[z] owns zoneLengths[z] consecutive
+  // entries of injectionIds / shiftKeys.
+  mod.method("set_zones", [] (pypowsybl::JavaHandle analysisContext,
+                              std::vector<std::string> const& zoneIds,
+                              std::vector<std::string> const& injectionIds,
+                              std::vector<double> const& shiftKeys,
+                              std::vector<int> const& zoneLengths) {
+            std::vector<::zone*> zones;
+            zones.reserve(zoneIds.size());
+            int offset = 0;
+            for (size_t z = 0; z < zoneIds.size(); ++z) {
+              int len = zoneLengths[z];
+              std::vector<std::string> injs(injectionIds.begin() + offset, injectionIds.begin() + offset + len);
+              std::vector<double> keys(shiftKeys.begin() + offset, shiftKeys.begin() + offset + len);
+              zones.push_back(pypowsybl::createZone(zoneIds[z], injs, keys));
+              offset += len;
+            }
+            pypowsybl::setZones(analysisContext, zones);
+            // powsybl-cpp exposes no zone destructor; setZones copies the data into the
+            // Java context, so the transient structs are left for process teardown.
+    }, "Set the GLSK-like zones of a sensitivity analysis context");
+
+  mod.method("run_sensitivity_analysis", [] (pypowsybl::JavaHandle analysisContext, pypowsybl::JavaHandle network,
+                                             bool dc, const pypowsybl::LoadFlowParameters& loadflowParameters,
+                                             std::string const& provider) {
+            // pypowsybl 1.15.0 dropped the dc argument of runSensitivityAnalysis; the mode
+            // now travels in the load flow parameters (as it does for runLoadFlow).
+            std::shared_ptr<pypowsybl::SensitivityAnalysisParameters> parameters(pypowsybl::createSensitivityAnalysisParameters());
+            parameters->loadflow_parameters = loadflowParameters;
+            parameters->loadflow_parameters.dc = dc;
+            return pypowsybl::runSensitivityAnalysis(analysisContext, network, *parameters, provider, nullptr);
+    }, "Run a sensitivity analysis");
+
+  mod.method("run_sensitivity_analysis_report", [] (pypowsybl::JavaHandle analysisContext, pypowsybl::JavaHandle network,
+                                                    bool dc, const pypowsybl::LoadFlowParameters& loadflowParameters,
+                                                    std::string const& provider, pypowsybl::JavaHandle reportNode) {
+            std::shared_ptr<pypowsybl::SensitivityAnalysisParameters> parameters(pypowsybl::createSensitivityAnalysisParameters());
+            parameters->loadflow_parameters = loadflowParameters;
+            parameters->loadflow_parameters.dc = dc;
+            return pypowsybl::runSensitivityAnalysis(analysisContext, network, *parameters, provider, &reportNode);
+    }, "Run a sensitivity analysis, collecting logs into a report node");
+
+  mod.method("get_sensitivity_matrix", [] (pypowsybl::JavaHandle result, std::string const& matrixId, std::string const& contingencyId) {
+            return pypowsybl::getSensitivityMatrix(result, matrixId, contingencyId);
+    }, "Get the sensitivity values matrix of a factor matrix for a given contingency");
+
+  mod.method("get_reference_matrix", [] (pypowsybl::JavaHandle result, std::string const& matrixId, std::string const& contingencyId) {
+            return pypowsybl::getReferenceMatrix(result, matrixId, contingencyId);
+    }, "Get the reference (function) values matrix of a factor matrix for a given contingency");
+
+  mod.method("get_sensitivity_analysis_provider_names", [] () {
+            return pypowsybl::getSensitivityAnalysisProviderNames();
+    }, "Get the names of the available sensitivity analysis providers");
+  // Element creation / update from a dataframe builder
+  // ===========================================================================
+
+  mod.add_type<ElementDataframe>("ElementDataframe")
+        .constructor<>()
+        .method("add_string_series", [] (ElementDataframe& b, std::string const& name, bool index, std::vector<std::string> const& values) {
+            b.add_string_series(name, index, values);
+        })
+        .method("add_double_series", [] (ElementDataframe& b, std::string const& name, bool index, std::vector<double> const& values) {
+            b.add_double_series(name, index, values);
+        })
+        .method("add_int_series", [] (ElementDataframe& b, std::string const& name, bool index, std::vector<int> const& values) {
+            b.add_int_series(name, index, values);
+        })
+        .method("add_bool_series", [] (ElementDataframe& b, std::string const& name, bool index, std::vector<int> const& values) {
+            b.add_bool_series(name, index, values);
+        })
+        .method("finish_dataframe", [] (ElementDataframe& b) {
+            b.finish_dataframe();
+        });
+
+  mod.method("create_element", [] (pypowsybl::JavaHandle network, ElementDataframe& builder, element_type type) {
+            std::vector<dataframe> dfs = builder.build_dataframes();
+            dataframe_array dataframes;
+            dataframes.dataframes = dfs.data();
+            dataframes.dataframes_count = (int) dfs.size();
+            pypowsybl::createElement(network, &dataframes, type);
+    }, "Create network elements of a given type from a dataframe builder");
+
+  mod.method("update_element", [] (pypowsybl::JavaHandle network, ElementDataframe& builder, element_type type,
+                                   bool perUnit, double nominalApparentPower) {
+            dataframe df = builder.build_dataframe();
+            pypowsybl::updateNetworkElementsWithSeries(network, &df, type, perUnit, nominalApparentPower);
+    }, "Update network elements of a given type from a dataframe builder");
+
+  // Dataframe schema metadata (parallel arrays: names, types, index flags).
+  // Types follow the series type codes: 0 = string, 1 = double, 2 = int, 3 = boolean.
+  mod.method("get_element_metadata_names", [] (element_type type) {
+            std::vector<std::string> result;
+            for (const auto& m : pypowsybl::getNetworkDataframeMetadata(type)) { result.push_back(m.name()); }
+            return result;
+    }, "Get the series names of the update/read dataframe of an element type");
+
+  mod.method("get_element_metadata_types", [] (element_type type) {
+            std::vector<int> result;
+            for (const auto& m : pypowsybl::getNetworkDataframeMetadata(type)) { result.push_back(m.type()); }
+            return result;
+    }, "Get the series types of the update/read dataframe of an element type");
+
+  mod.method("get_element_metadata_indices", [] (element_type type) {
+            std::vector<int> result;
+            for (const auto& m : pypowsybl::getNetworkDataframeMetadata(type)) { result.push_back(m.isIndex() ? 1 : 0); }
+            return result;
+    }, "Get the index flags of the update/read dataframe of an element type");
+
+  mod.method("get_element_creation_metadata_names", [] (element_type type) {
+            std::vector<std::string> result;
+            auto metadata = pypowsybl::getNetworkElementCreationDataframesMetadata(type);
+            if (!metadata.empty()) { for (const auto& m : metadata[0]) { result.push_back(m.name()); } }
+            return result;
+    }, "Get the series names of the creation dataframe of an element type");
+
+  mod.method("get_element_creation_metadata_types", [] (element_type type) {
+            std::vector<int> result;
+            auto metadata = pypowsybl::getNetworkElementCreationDataframesMetadata(type);
+            if (!metadata.empty()) { for (const auto& m : metadata[0]) { result.push_back(m.type()); } }
+            return result;
+    }, "Get the series types of the creation dataframe of an element type");
+
+  mod.method("get_element_creation_metadata_indices", [] (element_type type) {
+            std::vector<int> result;
+            auto metadata = pypowsybl::getNetworkElementCreationDataframesMetadata(type);
+            if (!metadata.empty()) { for (const auto& m : metadata[0]) { result.push_back(m.isIndex() ? 1 : 0); } }
+            return result;
+    }, "Get the index flags of the creation dataframe of an element type");
+
+  // Per-dataframe creation metadata, for element types that need several dataframes
+  // (shunt compensators with their sections, tap changers with their steps, ...).
+  mod.method("get_element_creation_dataframes_count", [] (element_type type) {
+            return (int) pypowsybl::getNetworkElementCreationDataframesMetadata(type).size();
+    }, "Get the number of dataframes needed to create an element type");
+
+  mod.method("get_element_creation_metadata_names_at", [] (element_type type, int dataframeIndex) {
+            std::vector<std::string> result;
+            auto metadata = pypowsybl::getNetworkElementCreationDataframesMetadata(type);
+            if (dataframeIndex >= 0 && dataframeIndex < (int) metadata.size()) {
+                for (const auto& m : metadata[dataframeIndex]) { result.push_back(m.name()); }
+            }
+            return result;
+    }, "Get the series names of the i-th creation dataframe of an element type");
+
+  mod.method("get_element_creation_metadata_types_at", [] (element_type type, int dataframeIndex) {
+            std::vector<int> result;
+            auto metadata = pypowsybl::getNetworkElementCreationDataframesMetadata(type);
+            if (dataframeIndex >= 0 && dataframeIndex < (int) metadata.size()) {
+                for (const auto& m : metadata[dataframeIndex]) { result.push_back(m.type()); }
+            }
+            return result;
+    }, "Get the series types of the i-th creation dataframe of an element type");
+
+  mod.method("get_element_creation_metadata_indices_at", [] (element_type type, int dataframeIndex) {
+            std::vector<int> result;
+            auto metadata = pypowsybl::getNetworkElementCreationDataframesMetadata(type);
+            if (dataframeIndex >= 0 && dataframeIndex < (int) metadata.size()) {
+                for (const auto& m : metadata[dataframeIndex]) { result.push_back(m.isIndex() ? 1 : 0); }
+            }
+            return result;
+    }, "Get the index flags of the i-th creation dataframe of an element type");
+
+  // ===========================================================================
+  // Extension creation / update / removal (reuses the ElementDataframe builder)
+  // ===========================================================================
+
+  mod.method("create_extensions", [] (pypowsybl::JavaHandle network, ElementDataframe& builder, std::string name) {
+            dataframe df = builder.build_dataframe();
+            dataframe_array dataframes;
+            dataframes.dataframes = &df;
+            dataframes.dataframes_count = 1;
+            pypowsybl::createExtensions(network, &dataframes, name);
+    }, "Create extensions of a given name from a dataframe builder");
+
+  mod.method("update_extension", [] (pypowsybl::JavaHandle network, ElementDataframe& builder, std::string name, std::string tableName) {
+            dataframe df = builder.build_dataframe();
+            pypowsybl::updateNetworkElementsExtensionsWithSeries(network, name, tableName, &df);
+    }, "Update extensions of a given name from a dataframe builder");
+
+  mod.method("remove_extensions", [] (pypowsybl::JavaHandle network, std::string name, std::vector<std::string> const& ids) {
+            pypowsybl::removeExtensions(network, name, ids);
+    }, "Remove the extensions of a given name from the elements with the given ids");
+
+  mod.method("get_extensions_information", [] () {
+            return pypowsybl::getExtensionsInformation();
+    }, "Get a dataframe describing all the available extensions");
+
+  mod.method("get_extension_creation_metadata_names", [] (std::string name) {
+            std::vector<std::string> result;
+            auto metadata = pypowsybl::getNetworkExtensionsCreationDataframesMetadata(name);
+            if (!metadata.empty()) { for (const auto& m : metadata[0]) { result.push_back(m.name()); } }
+            return result;
+    }, "Get the series names of the creation dataframe of an extension");
+
+  mod.method("get_extension_creation_metadata_types", [] (std::string name) {
+            std::vector<int> result;
+            auto metadata = pypowsybl::getNetworkExtensionsCreationDataframesMetadata(name);
+            if (!metadata.empty()) { for (const auto& m : metadata[0]) { result.push_back(m.type()); } }
+            return result;
+    }, "Get the series types of the creation dataframe of an extension");
+
+  mod.method("get_extension_creation_metadata_indices", [] (std::string name) {
+            std::vector<int> result;
+            auto metadata = pypowsybl::getNetworkExtensionsCreationDataframesMetadata(name);
+            if (!metadata.empty()) { for (const auto& m : metadata[0]) { result.push_back(m.isIndex() ? 1 : 0); } }
+            return result;
+    }, "Get the index flags of the creation dataframe of an extension");
+
+  mod.method("get_extension_metadata_names", [] (std::string name, std::string tableName) {
+            std::vector<std::string> result;
+            for (const auto& m : pypowsybl::getNetworkExtensionsDataframeMetadata(name, tableName)) { result.push_back(m.name()); }
+            return result;
+    }, "Get the series names of the update dataframe of an extension");
+
+  mod.method("get_extension_metadata_types", [] (std::string name, std::string tableName) {
+            std::vector<int> result;
+            for (const auto& m : pypowsybl::getNetworkExtensionsDataframeMetadata(name, tableName)) { result.push_back(m.type()); }
+            return result;
+    }, "Get the series types of the update dataframe of an extension");
+
+  mod.method("get_extension_metadata_indices", [] (std::string name, std::string tableName) {
+            std::vector<int> result;
+            for (const auto& m : pypowsybl::getNetworkExtensionsDataframeMetadata(name, tableName)) { result.push_back(m.isIndex() ? 1 : 0); }
+            return result;
+    }, "Get the index flags of the update dataframe of an extension");
+
+  // ===========================================================================
+  // Network modifications (topology builders)
+  // ===========================================================================
+
+  // Modification dataframe schema metadata (parallel arrays: names, types, index flags),
+  // keyed by the network_modification_type ordinal. Same type codes as element metadata.
+  mod.method("get_modification_metadata_names", [] (int modificationType) {
+            std::vector<std::string> result;
+            for (const auto& m : pypowsybl::getModificationMetadata(static_cast<network_modification_type>(modificationType))) {
+                result.push_back(m.name());
+            }
+            return result;
+    }, "Get the series names of a network modification dataframe");
+
+  mod.method("get_modification_metadata_types", [] (int modificationType) {
+            std::vector<int> result;
+            for (const auto& m : pypowsybl::getModificationMetadata(static_cast<network_modification_type>(modificationType))) {
+                result.push_back(m.type());
+            }
+            return result;
+    }, "Get the series types of a network modification dataframe");
+
+  mod.method("get_modification_metadata_indices", [] (int modificationType) {
+            std::vector<int> result;
+            for (const auto& m : pypowsybl::getModificationMetadata(static_cast<network_modification_type>(modificationType))) {
+                result.push_back(m.isIndex() ? 1 : 0);
+            }
+            return result;
+    }, "Get the index flags of a network modification dataframe");
+
+  mod.method("create_network_modification", [] (pypowsybl::JavaHandle network, ElementDataframe& builder,
+                                                int modificationType, bool throwException) {
+            std::vector<dataframe> dfs = builder.build_dataframes();
+            dataframe_array dataframes;
+            dataframes.dataframes = dfs.data();
+            dataframes.dataframes_count = (int) dfs.size();
+            pypowsybl::createNetworkModification(network, &dataframes,
+                                                 static_cast<network_modification_type>(modificationType),
+                                                 throwException, nullptr);
+    }, "Apply a network modification described by a dataframe builder");
+
+  mod.method("remove_elements_modification", [] (pypowsybl::JavaHandle network, std::vector<std::string> const& connectableIds,
+                                                 int removeModificationType, bool throwException) {
+            pypowsybl::removeElementsModification(network, connectableIds, nullptr,
+                                                  static_cast<remove_modification_type>(removeModificationType),
+                                                  throwException, nullptr);
+    }, "Remove elements (feeder bays, voltage levels or HVDC lines) with the given ids");
+
+  mod.method("get_unused_connectable_order_positions", [] (pypowsybl::JavaHandle network, std::string busbarSectionId,
+                                                           std::string beforeOrAfter) {
+            return pypowsybl::getUnusedConnectableOrderPositions(network, busbarSectionId, beforeOrAfter);
+    }, "Get the unused connectable order positions before or after a busbar section");
 }
