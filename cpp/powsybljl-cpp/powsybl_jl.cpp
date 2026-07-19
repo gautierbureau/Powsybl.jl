@@ -698,9 +698,12 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
   mod.method("run_sensitivity_analysis", [] (pypowsybl::JavaHandle analysisContext, pypowsybl::JavaHandle network,
                                              bool dc, const pypowsybl::LoadFlowParameters& loadflowParameters,
                                              std::string const& provider) {
+            // pypowsybl 1.15.0 dropped the dc argument of runSensitivityAnalysis; the mode
+            // now travels in the load flow parameters (as it does for runLoadFlow).
             std::shared_ptr<pypowsybl::SensitivityAnalysisParameters> parameters(pypowsybl::createSensitivityAnalysisParameters());
             parameters->loadflow_parameters = loadflowParameters;
-            return pypowsybl::runSensitivityAnalysis(analysisContext, network, dc, *parameters, provider, nullptr);
+            parameters->loadflow_parameters.dc = dc;
+            return pypowsybl::runSensitivityAnalysis(analysisContext, network, *parameters, provider, nullptr);
     }, "Run a sensitivity analysis");
 
   mod.method("run_sensitivity_analysis_report", [] (pypowsybl::JavaHandle analysisContext, pypowsybl::JavaHandle network,
@@ -708,7 +711,8 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
                                                     std::string const& provider, pypowsybl::JavaHandle reportNode) {
             std::shared_ptr<pypowsybl::SensitivityAnalysisParameters> parameters(pypowsybl::createSensitivityAnalysisParameters());
             parameters->loadflow_parameters = loadflowParameters;
-            return pypowsybl::runSensitivityAnalysis(analysisContext, network, dc, *parameters, provider, &reportNode);
+            parameters->loadflow_parameters.dc = dc;
+            return pypowsybl::runSensitivityAnalysis(analysisContext, network, *parameters, provider, &reportNode);
     }, "Run a sensitivity analysis, collecting logs into a report node");
 
   mod.method("get_sensitivity_matrix", [] (pypowsybl::JavaHandle result, std::string const& matrixId, std::string const& contingencyId) {
