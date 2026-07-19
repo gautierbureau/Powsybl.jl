@@ -28,7 +28,7 @@ module SemiInfinite
 using JuMP
 import HiGHS
 
-export SIPProblem, SIPOptions, SIPResult, solve_bnf
+export SIPProblem, SIPOptions, SIPResult, MinMaxResult, solve_bnf, solve_rrhs, solve_minmax
 
 # ---------------------------------------------------------------------------
 # Problem definition
@@ -240,6 +240,154 @@ function solve_bnf(problem::SIPProblem, options::SIPOptions = SIPOptions())
     end
 
     return SIPResult(status, x_inc, f_inc, bound, iterations, max_violation, Y, history)
+end
+
+# ---------------------------------------------------------------------------
+# Restriction of the right-hand side (Mitsos, 2011): feasible upper bounds
+# ---------------------------------------------------------------------------
+"""
+    solve_rrhs(problem::SIPProblem, options::SIPOptions = SIPOptions();
+               epsilon = 0.1, beta = 0.5) -> SIPResult
+
+Solve `problem` with the restriction-of-the-right-hand-side algorithm, which — unlike the plain
+cutting-plane method — produces a sequence of **guaranteed feasible** points and hence valid
+*upper* bounds.
+
+Each iteration solves two decision problems over growing discretizations: the plain relaxation
+(a lower bound) and a **restricted** problem `gᵢ(x, y) ≤ -ε` whose solution, once verified
+feasible for the full constraint set by the separation problem, is a feasible point of the SIP.
+The restriction `ε` is shrunk by `beta` whenever a feasible point is found, driving the upper
+bound down to the lower bound. Terminates when the gap falls within `options.opt_tol`.
+"""
+function solve_rrhs(problem::SIPProblem, options::SIPOptions = SIPOptions();
+                    epsilon::Float64 = 0.1, beta::Float64 = 0.5)
+    is_min = problem.sense == :Min
+    better(a, b) = is_min ? a < b : a > b   # is a a better objective than b?
+
+    Y_lbp = Vector{Float64}[]
+    Y_ubp = Vector{Float64}[]
+    ε = epsilon
+    lower = is_min ? -Inf : Inf
+    upper = is_min ? Inf : -Inf
+    best_x = fill(NaN, problem.nx)
+    best_violation = Inf
+    history = NamedTuple[]
+    status = :max_iter
+    iterations = 0
+
+    for k in 1:options.max_iter
+        iterations = k
+
+        # Lower bound: plain relaxation over Y_lbp.
+        model, x = _build_decision_problem(problem, Y_lbp, options; restriction = 0.0)
+        optimize!(model)
+        st = termination_status(model)
+        if st in (MOI.INFEASIBLE, MOI.INFEASIBLE_OR_UNBOUNDED)
+            status = :infeasible
+            break
+        end
+        st in (MOI.OPTIMAL, MOI.LOCALLY_SOLVED) ||
+            error("lower-bounding problem terminated with status $st")
+        lower = objective_value(model)
+        x_lbp = value.(x)
+        for i in 1:n_constraints(problem)
+            y_star, violation = _solve_separation(problem, x_lbp, i, options)
+            violation > options.feas_tol && !_is_duplicate(y_star, Y_lbp, options.dedup_tol) &&
+                push!(Y_lbp, y_star)
+        end
+
+        # Upper bound: restricted problem over Y_ubp, then verify global feasibility.
+        model_u, xu = _build_decision_problem(problem, Y_ubp, options; restriction = ε)
+        optimize!(model_u)
+        stu = termination_status(model_u)
+        feasible_point = false
+        if stu in (MOI.OPTIMAL, MOI.LOCALLY_SOLVED)
+            x_ubp = value.(xu)
+            f_ubp = objective_value(model_u)
+            worst = -Inf
+            for i in 1:n_constraints(problem)
+                y_star, violation = _solve_separation(problem, x_ubp, i, options)
+                violation > worst && (worst = violation)
+                violation > options.feas_tol && !_is_duplicate(y_star, Y_ubp, options.dedup_tol) &&
+                    push!(Y_ubp, y_star)
+            end
+            if worst <= options.feas_tol
+                feasible_point = true
+                if better(f_ubp, upper)
+                    upper = f_ubp
+                    best_x = x_ubp
+                    best_violation = worst
+                end
+            end
+        end
+
+        gap = abs(upper - lower)
+        push!(history, (iter = k, lower = lower, upper = upper, gap = gap, epsilon = ε,
+                        feasible = feasible_point))
+        options.verbose && @info "RRHS" iter = k lower = lower upper = upper gap = gap epsilon = ε
+
+        if isfinite(upper) && gap <= options.opt_tol
+            status = :optimal
+            break
+        end
+        # Tighten the restriction once we have a feasible point; relax it if the restricted
+        # problem was itself infeasible (restriction too strong for the current discretization).
+        if feasible_point || stu in (MOI.INFEASIBLE, MOI.INFEASIBLE_OR_UNBOUNDED)
+            ε *= beta
+        end
+    end
+
+    return SIPResult(status, best_x, upper, lower, iterations, best_violation,
+                     vcat(Y_lbp, Y_ubp), history)
+end
+
+# ---------------------------------------------------------------------------
+# Min-max (robust) optimisation via the SIP reformulation
+# ---------------------------------------------------------------------------
+"""
+    MinMaxResult
+
+Result of [`solve_minmax`](@ref): `status`, the robust decision `x`, the optimal worst-case
+value `value = maxᵧ F(x, y)`, the `iterations`, the generated worst-case parameters
+`discretization`, and the per-iteration `history`.
+"""
+struct MinMaxResult
+    status::Symbol
+    x::Vector{Float64}
+    value::Float64
+    iterations::Int
+    discretization::Vector{Vector{Float64}}
+    history::Vector{NamedTuple}
+end
+
+"""
+    solve_minmax(; nx, ny, x_lower, x_upper, y_lower, y_upper, F,
+                 value_bounds = (-1e6, 1e6), x_integer = false,
+                 options = SIPOptions()) -> MinMaxResult
+
+Solve the robust min-max problem
+
+    min_{x ∈ X}  max_{y ∈ Y}  F(x, y)
+
+by the epigraph reformulation into a semi-infinite program: introduce a scalar `t` and solve
+`min t s.t. F(x, y) − t ≤ 0 ∀ y ∈ Y` with [`solve_bnf`](@ref). `F` takes the decision vector
+`x` and the parameter vector `y`; `value_bounds` bounds the epigraph variable `t`.
+"""
+function solve_minmax(; nx::Int, ny::Int, x_lower, x_upper, y_lower, y_upper, F::Function,
+                      value_bounds = (-1e6, 1e6), x_integer = false, options::SIPOptions = SIPOptions())
+    xl = _vec(x_lower, nx); xu = _vec(x_upper, nx); xint = _bvec(x_integer, nx)
+    # Augmented decision (x, t): minimise t subject to F(x, y) ≤ t for all y.
+    problem = SIPProblem(
+        nx = nx + 1, ny = ny,
+        x_lower = vcat(xl, value_bounds[1]),
+        x_upper = vcat(xu, value_bounds[2]),
+        y_lower = y_lower, y_upper = y_upper,
+        objective = xt -> xt[nx + 1],
+        constraints = (xt, y) -> F(xt[1:nx], y) - xt[nx + 1],
+        sense = :Min, x_integer = vcat(xint, false))
+    res = solve_bnf(problem, options)
+    return MinMaxResult(res.status, res.x[1:nx], res.x[nx + 1], res.iterations,
+                        res.discretization, res.history)
 end
 
 end # module

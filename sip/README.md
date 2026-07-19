@@ -39,9 +39,15 @@ so `gᵢ` must accept arguments that are either numbers or JuMP variables.
   the decision problem over the current discretization and the separation problem at the
   incumbent; when the worst-case violation is within tolerance the incumbent is globally
   optimal, otherwise the worst-case parameter is added and the loop repeats.
+* **`solve_rrhs`** — restriction of the right-hand side (Mitsos, 2011). Alongside the plain
+  relaxation (a lower bound), solve a *restricted* problem `gᵢ(x, y) ≤ -ε`; once its solution is
+  verified feasible for the full constraint set it is a genuine feasible point (an upper bound).
+  Shrinking `ε` drives the upper bound down to the lower bound. Returns feasible iterates.
+* **`solve_minmax`** — robust min-max `min_x max_y F(x, y)` via the epigraph reformulation
+  `min t s.t. F(x, y) − t ≤ 0 ∀ y`, solved with `solve_bnf`.
 
-_(further solvers — a restriction-based feasible-point variant, the existence-constrained SIP,
-and a min-max formulation — are being added incrementally.)_
+_(the existence-constrained SIP variant — `∀y ∃z: g(x, y, z) ≤ 0`, whose separation is a
+max-min oracle — is being added as a further increment.)_
 
 ## Usage
 

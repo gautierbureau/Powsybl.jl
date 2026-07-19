@@ -67,3 +67,43 @@ end
     res = solve_bnf(p)
     @test res.status == :infeasible
 end
+
+@testset "RRHS feasible upper bounds" begin
+    # Same 1-D problem, x* = 0.5. RRHS converges the LB/UB gap and returns a feasible point.
+    p = SIPProblem(nx = 1, ny = 1, x_lower = -10.0, x_upper = 10.0,
+                   y_lower = 0.0, y_upper = 0.5,
+                   objective = x -> x[1], constraints = (x, y) -> y[1] - x[1])
+    res = solve_rrhs(p, SIPOptions(opt_tol = 1e-5); epsilon = 0.1, beta = 0.5)
+
+    @test res.status == :optimal
+    @test res.x[1] ≈ 0.5 atol = 1e-4
+    @test res.objective ≈ 0.5 atol = 1e-4       # feasible upper bound
+    @test res.bound <= 0.5 + 1e-9               # valid lower bound
+    @test res.x[1] >= 0.5 - 1e-9                # the returned point is feasible (x ≥ 0.5)
+end
+
+@testset "RRHS 2-D matches BNF" begin
+    p = SIPProblem(nx = 2, ny = 1, x_lower = [0.0, 0.0], x_upper = [10.0, 10.0],
+                   y_lower = 0.0, y_upper = 1.0,
+                   objective = x -> x[1] + x[2],
+                   constraints = (x, y) -> 1 - y[1] * x[1] - (1 - y[1]) * x[2])
+    res = solve_rrhs(p, SIPOptions(opt_tol = 1e-5))
+    @test res.status == :optimal
+    @test res.objective ≈ 2.0 atol = 1e-3
+    @test res.x ≈ [1.0, 1.0] atol = 1e-2
+end
+
+@testset "Min-max (robust) via SIP reformulation" begin
+    # min_x max_{y∈[0,1]} (x + 2y - 2xy),  x ∈ [0,2]
+    # max_y is linear in y: 2-x for x<1, x for x>1  →  min at x* = 1, value = 1.
+    res = solve_minmax(nx = 1, ny = 1, x_lower = 0.0, x_upper = 2.0,
+                       y_lower = 0.0, y_upper = 1.0,
+                       F = (x, y) -> x[1] + 2 * y[1] - 2 * x[1] * y[1])
+
+    @test res.status == :optimal
+    @test res.x[1] ≈ 1.0 atol = 1e-5
+    @test res.value ≈ 1.0 atol = 1e-5
+    # both extreme parameter values are worst cases at the saddle
+    @test any(y -> isapprox(y[1], 0.0, atol = 1e-5), res.discretization)
+    @test any(y -> isapprox(y[1], 1.0, atol = 1e-5), res.discretization)
+end
