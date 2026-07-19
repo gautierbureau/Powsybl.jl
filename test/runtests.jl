@@ -847,3 +847,49 @@ end
   @test "tso" in names(RAO.get_max_remedial_actions_per_tso_usage_limits(crac))
   @test "tso" in names(RAO.get_max_elementary_actions_per_tso_usage_limits(crac))
 end
+@testset "Test flow decomposition" begin
+  FD = Powsybl.FlowDecomposition
+  network = Powsybl.Network.load("simple-eu.xiidm")
+  lines = Powsybl.Network.get_lines(network)
+  branch = lines[1, "id"]
+  other_branch = lines[2, "id"]
+
+  # Default parameters expose editable, typed fields
+  params = FD.Parameters()
+  @test params.enable_losses_compensation == false
+  @test params.rescale_mode == FD.NONE
+  @test params.sensitivity_variable_batch_size == 15000
+
+  # Monitoring all branches decomposes every branch on the pre-contingency (N) state
+  ctx = FD.create()
+  FD.add_all_branches_as_monitored_elements(ctx)
+  df = FD.run(ctx, network)
+  @test issubset(["xnec_id", "branch_id", "contingency_id", "country1", "country2",
+                  "ac_reference_flow1", "dc_reference_flow", "commercial_flow",
+                  "loop_flow_from_be", "loop_flow_from_fr"], names(df))
+  @test size(df, 1) == 18
+  @test all(df[:, "contingency_id"] .== "")   # all pre-contingency (XNE)
+
+  # A single monitored branch on the N state yields exactly one XNE
+  ctx1 = FD.create()
+  FD.add_precontingency_monitored_elements(ctx1, branch)
+  @test size(FD.run(ctx1, network), 1) == 1
+
+  # A contingency plus a post-contingency monitored branch yields an XNEC tagged with it
+  ctx2 = FD.create()
+  FD.add_single_element_contingency(ctx2, other_branch; contingency_id = "cont1")
+  FD.add_postcontingency_monitored_elements(ctx2, branch, "cont1")
+  post = FD.run(ctx2, network)
+  @test size(post, 1) == 1
+  @test post[1, "contingency_id"] == "cont1"
+
+  # Edited parameters flow through to the run. Losses compensation mutates the network
+  # (adds fictitious loss loads), so use a freshly loaded network for it.
+  edited = FD.Parameters()
+  edited.rescale_mode = FD.ACER_METHODOLOGY
+  edited.enable_losses_compensation = true
+  fresh = Powsybl.Network.load("simple-eu.xiidm")
+  ctx3 = FD.create()
+  FD.add_all_branches_as_monitored_elements(ctx3)
+  @test size(FD.run(ctx3, fresh; parameters = edited), 1) == 18
+end

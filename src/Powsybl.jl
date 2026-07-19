@@ -25,4 +25,5 @@ module Powsybl
   include("SensitivityAnalysis.jl")
   include("Diagram.jl")
   include("RAO.jl")
+  include("FlowDecomposition.jl")
 end
