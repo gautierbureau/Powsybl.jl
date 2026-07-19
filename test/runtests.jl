@@ -103,17 +103,22 @@ end
   @test defaults.solver == RAO.CBC
   @test defaults.load_flow_provider == "OpenLoadFlow"
 
+  # Predefined topological RA combinations default to empty and round-trip as nested lists
+  @test RAO.rao_parameters().predefined_combinations == Vector{String}[]
+
   # Parameters round-trip through JSON, preserving edited fields
   edited = RAO.rao_parameters()
   edited.objective_function_type = RAO.MAX_MIN_MARGIN
   edited.max_mip_iterations = 5
   edited.pst_model = RAO.APPROXIMATED_INTEGERS
+  edited.predefined_combinations = [["ra1", "ra2"], ["ra3"]]
   json = RAO.parameters_to_json(edited)
   @test occursin("MAX_MIN_MARGIN", json)
   restored = RAO.parameters_from_json(json)
   @test restored.objective_function_type == RAO.MAX_MIN_MARGIN
   @test restored.max_mip_iterations == 5
   @test restored.pst_model == RAO.APPROXIMATED_INTEGERS
+  @test restored.predefined_combinations == [["ra1", "ra2"], ["ra3"]]
 
   # Load parameters into an editable struct and run the RAO with it
   parameters = RAO.load_parameters("data/rao/rao_parameters.json")
