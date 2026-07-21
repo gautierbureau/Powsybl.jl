@@ -54,6 +54,34 @@ Two devices whose behaviour is a **disjunction** (modelled with binaries):
   (`|P| ≤ P^lim`) or **trips** to zero flow. Enable per PST with `switchable = [pst_id]` and
   `pst_limits = Dict(pst_id => P^lim)`.
 
+## Full PST automaton
+
+Beyond the simple switchable-PST above, a PST can be modelled as the **full protection
+automaton**: a physical device (not a free corrective) whose behaviour in each state is decided
+by its own logic, with the trip decision **propagating** forward through the states.
+
+Per contingency, in the post-corrective state the PST:
+
+* **activates** its regulation only once the pre-corrective flow crosses a threshold,
+  `|P^{N-1}| ≥ P^act`;
+* when active, **regulates toward** `±P^tar`, i.e. it settles at the median
+  `mid( h(Δθ + α̲) , clamp(h(Δθ + α⁰), −P^tar, P^tar) , h(Δθ + ᾱ) )` over its angle range;
+* **trips** on over-current (`|P| ≥ P^lim`) in any state, and a trip **propagates**: a device
+  open in `N` stays open in `N-1`, and one open in `N-1` stays open post-corrective.
+
+Enable it per PST with
+
+```julia
+pst_model = Dict("PST_T" => (p_lim = 300.0, p_act = 50.0, p_tar = 30.0))
+```
+
+The over-current protection is **self-referential** — an open device decouples its buses, so the
+*would-be* natural flow can be arranged to exceed the rating and "justify" a spurious trip. Such
+a disconnected state is only **locally consistent** (Aachen Remark 1); the physical equilibrium
+is the one that keeps a device connected unless it genuinely over-currents. It is selected
+**lexicographically**: among the consistent equilibria, minimise the number of disconnections
+first, then the overload.
+
 ## What it computes
 
 ```
@@ -104,9 +132,11 @@ nominal state and as the fallback).
 
 Uncertainty = injection deviations; correctives = **continuous PST angles**; the four states
 nominal / N / N-1 / N-1/c with single-branch N-1 outages and per-state limits; the
-**participation-factor secondary frequency response** with generator-limit saturation; and
-**integer-mode devices** — HVDC AC-emulation clamp and PST over-current disconnection. Deferred:
-the full 11-mode PST activation/target regulation with automatic over-current protection in the
-pre-corrective states (the "ignore-discretization-point" consistency machinery), topology
-switching (bus splitting), and the outer flexibility-maximisation objective (which turns this
-oracle into the full three-level program).
+**participation-factor secondary frequency response** with generator-limit saturation;
+**integer-mode devices** — HVDC AC-emulation clamp and PST over-current disconnection; and the
+**full PST automaton** — activation, target regulation and over-current protection with forward
+trip propagation, its multiple equilibria resolved by the local-consistency tie-break. Deferred:
+the automaton's adversarial discretization when the full PST is combined with *free* correctives
+(the "ignore-discretization-point" consistency machinery for the min-max), topology switching
+(bus splitting), and the outer flexibility-maximisation objective (which turns this oracle into
+the full three-level program).

@@ -172,6 +172,43 @@ end
     @test tight.phi ≈ 150.0 / 110.0 - 1 atol = 5e-3
 end
 
+@testset "Full PST automaton (activation, target regulation, over-current propagation)" begin
+    # After the L_B outage the PST corridor carries ≈ 57.14 MW (= 200 · 320/1120). The full
+    # automaton (pst_model) then decides, per contingency: stay inactive at α⁰, activate and
+    # regulate toward ±P^tar once |P^{N-1}| ≥ P^act, or trip on over-current and propagate the
+    # trip forward. The PST is a physical device here (no free corrective), so its mode and
+    # connection are resolved cooperatively to the physical (maximally-connected) equilibrium.
+    nat = 200.0 * 320 / 1120            # ≈ 57.14 MW PST corridor flow after L_B out
+    orc(mon, pm) = W.worst_case_oracle(build_ext(); uncertain = NO_UNC, monitored = mon,
+                                       contingencies = ["L_B"], pst_model = pm)
+
+    # (1) activation + target regulation: |57| ≥ P^act = 50 ⇒ regulate toward P^tar = 30.
+    monP = Dict("PST_T" => (base = 1e4, contingency = 1e4, corrective = 40.0))
+    reg = orc(monP, Dict("PST_T" => (p_lim = 300.0, p_act = 50.0, p_tar = 30.0)))
+    @test W.is_secure(reg)
+    @test reg.phi ≈ 30.0 / 40.0 - 1 atol = 5e-3          # regulated to +30 MW ⇒ within the 40 MW monitor
+
+    # (2) below the activation threshold (P^act = 100 > 57): the PST stays inactive at α⁰.
+    off = orc(monP, Dict("PST_T" => (p_lim = 300.0, p_act = 100.0, p_tar = 30.0)))
+    @test !W.is_secure(off)
+    @test off.phi ≈ nat / 40.0 - 1 atol = 5e-3           # uncorrected 57 MW overloads the 40 MW monitor
+
+    # (3) over-current trip + forward propagation: P^lim = 40 < 57 ⇒ the PST trips in N-1 and
+    # stays open post-corrective, so all 200 MW routes through L12a (monitor ≤ 150 in N-1/c).
+    monL = Dict("L12a" => (base = 1e4, contingency = 1e4, corrective = 150.0))
+    trip = orc(monL, Dict("PST_T" => (p_lim = 40.0, p_act = 50.0, p_tar = 30.0)))
+    @test !W.is_secure(trip)
+    @test trip.phi ≈ 200.0 / 150.0 - 1 atol = 5e-3       # PST tripped ⇒ L12a = 200 MW
+
+    # (4) no over-current (P^lim = 300 ≫ 57) and never activated: the PST stays connected at α⁰
+    # and the corridor split leaves L12a ≈ 142.86 MW, within the 150 MW monitor. This is the
+    # case the local-consistency tie-break protects: a spurious "trip" (which would zero the
+    # corridor and satisfy the monitor) must be rejected in favour of the connected equilibrium.
+    stay = orc(monL, Dict("PST_T" => (p_lim = 300.0, p_act = 1000.0, p_tar = 200.0)))
+    @test W.is_secure(stay)
+    @test stay.phi ≈ (200.0 * 500 / 700) / 150.0 - 1 atol = 5e-3   # L12a ≈ 142.86 MW, PST stays
+end
+
 @testset "Base-only robust check (no contingency, no corrective action)" begin
     # With no contingency there is no post-corrective state, so the PST cannot act; extra load
     # that overloads L12a in the base state is therefore uncorrectable.
