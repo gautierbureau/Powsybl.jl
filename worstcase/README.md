@@ -43,6 +43,17 @@ total response covers the imbalance. Modelled exactly (the `mid`/clamp is an MIL
 `participation = Dict(gen_id => f_g)`; omit it to keep a single slack bus (which unrealistically
 dumps the whole imbalance on one bus).
 
+## Integer-mode devices
+
+Two devices whose behaviour is a **disjunction** (modelled with binaries):
+
+* **HVDC in AC-emulation** — its flow follows `P⁰ + K·Δθ` but is **clamped** to a hard limit
+  `±P^lim` (a 3-mode disjunction, the same `mid` clamp). Declare with
+  `hvdc = [(; id, bus1, bus2, k, p_zero, p_lim)]`.
+* **PST over-current disconnection** — a corrective PST either **regulates within its rating**
+  (`|P| ≤ P^lim`) or **trips** to zero flow. Enable per PST with `switchable = [pst_id]` and
+  `pst_limits = Dict(pst_id => P^lim)`.
+
 ## What it computes
 
 ```
@@ -92,7 +103,10 @@ nominal state and as the fallback).
 ## Scope (first slice)
 
 Uncertainty = injection deviations; correctives = **continuous PST angles**; the four states
-nominal / N / N-1 / N-1/c with single-branch N-1 outages and per-state limits; and the
-**participation-factor secondary frequency response** with generator-limit saturation. Deferred:
-the integer-mode PST/HVDC models, topology switching (bus splitting), and the outer
-flexibility-maximisation objective (which turns this oracle into the full three-level program).
+nominal / N / N-1 / N-1/c with single-branch N-1 outages and per-state limits; the
+**participation-factor secondary frequency response** with generator-limit saturation; and
+**integer-mode devices** — HVDC AC-emulation clamp and PST over-current disconnection. Deferred:
+the full 11-mode PST activation/target regulation with automatic over-current protection in the
+pre-corrective states (the "ignore-discretization-point" consistency machinery), topology
+switching (bus splitting), and the outer flexibility-maximisation objective (which turns this
+oracle into the full three-level program).

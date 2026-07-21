@@ -15,7 +15,7 @@ Powsybl.LibPowsybl.set_config_read(false)
 # pst_focus + a parallel direct line L_B (B1 → B3): two corridors from B1 to B3, one via the PST
 # (L1_2a → PST_T → B2b → L2b_3), one direct (L_B). Outaging L_B forces all power through the PST
 # corridor, overloading L12a — a contingency the *post-corrective* PST can relieve.
-function build_ext()
+function build_ext(; with_LB = true)
     KV = 400.0; BASE = 100.0; ZB = KV^2 / BASE
     x_of(b) = BASE / b * ZB
     net = NET.create_empty("pst_focus_ext")
@@ -34,7 +34,7 @@ function build_ext()
     NET.create_lines(net; id = ["L2b_3"], voltage_level1_id = ["VL2b"], bus1_id = ["B2b"],
         voltage_level2_id = ["VL3"], bus2_id = ["B3"], r = [0.0], x = [x_of(BASE / 0.2)],
         g1 = [0.0], b1 = [0.0], g2 = [0.0], b2 = [0.0])
-    NET.create_lines(net; id = ["L_B"], voltage_level1_id = ["VL1"], bus1_id = ["B1"],
+    with_LB && NET.create_lines(net; id = ["L_B"], voltage_level1_id = ["VL1"], bus1_id = ["B1"],
         voltage_level2_id = ["VL3"], bus2_id = ["B3"], r = [0.0], x = [x_of(300.0)],
         g1 = [0.0], b1 = [0.0], g2 = [0.0], b2 = [0.0])
     NET.create_2_windings_transformers(net; id = ["PST_T"],
@@ -62,7 +62,7 @@ const N1_OVERLOAD = 200.0 * 500 / 700 / 110 - 1     # ≈ 0.2987
     gm = W.GridModel(build_ext())
     ids = Dict(b.id => b for b in gm.branches)
     @test Set(keys(ids)) == Set(["L12a", "L1_2a", "L2b_3", "L_B", "PST_T"])
-    @test ids["PST_T"].is_pst
+    @test ids["PST_T"].kind === :pst
     @test ids["PST_T"].alpha0 ≈ 0.0 atol = 1e-9         # neutral tap ⇒ preventive angle 0
     @test rad2deg(ids["PST_T"].alpha_max) ≈ 30.0 atol = 1e-6
     @test ids["L_B"].h ≈ 300.0
@@ -135,6 +135,41 @@ end
     slack = W.worst_case_oracle(build_ext(); uncertain = unc, monitored = Dict("L12a" => 110.0))
     @test !W.is_secure(part)                   # G2 capped ⇒ can no longer keep it secure
     @test part.phi < slack.phi                 # but still helps partially vs. the single slack
+end
+
+@testset "HVDC AC-emulation clamp (3-mode disjunction)" begin
+    # An HVDC B1→B3 in AC-emulation shares the corridor flow (K = 300 MW/rad). With 100 MW of
+    # extra load and L12a ≤ 110, a generous limit keeps the grid secure; as the hard limit P^lim
+    # tightens the HVDC saturates and helps less; at P^lim = 0 it is equivalent to no HVDC.
+    unc = Dict("VL3_0" => (-100.0, 0.0)); mon = Dict("L12a" => 110.0)
+    hv(pl) = [(id = "H1", bus1 = "VL1_0", bus2 = "VL3_0", k = 300.0, p_zero = 0.0, p_lim = pl)]
+    open   = W.worst_case_oracle(build_ext(with_LB = false); uncertain = unc, monitored = mon, hvdc = hv(1000.0))
+    capped = W.worst_case_oracle(build_ext(with_LB = false); uncertain = unc, monitored = mon, hvdc = hv(50.0))
+    off    = W.worst_case_oracle(build_ext(with_LB = false); uncertain = unc, monitored = mon, hvdc = hv(0.0))
+    none   = W.worst_case_oracle(build_ext(with_LB = false); uncertain = unc, monitored = mon)
+
+    @test W.is_secure(open)                       # unclamped HVDC carries its share ⇒ secure
+    @test !W.is_secure(capped)                    # clamp binds ⇒ can no longer keep L12a in limit
+    @test capped.phi > open.phi + 0.5
+    @test off.phi ≈ none.phi atol = 1e-6          # a zero-limit HVDC ≡ no HVDC
+end
+
+@testset "PST over-current (disconnection disjunction)" begin
+    # Contingency L_B; the corrective PST relieves L12a in the post-corrective state only if its
+    # own rating allows it. A 150 MW rating is enough (regulates to +30°); a 50 MW rating caps
+    # the PST so it cannot keep L12a within its 110 MW permanent limit.
+    unc = Dict("VL3_0" => (0.0, 0.0))
+    lim = (base = 110.0, contingency = 150.0, corrective = 110.0)
+    ample = W.worst_case_oracle(build_ext(); uncertain = unc, monitored = Dict("L12a" => lim),
+                                correctives = ["PST_T"], switchable = ["PST_T"],
+                                pst_limits = Dict("PST_T" => 150.0), contingencies = ["L_B"])
+    tight = W.worst_case_oracle(build_ext(); uncertain = unc, monitored = Dict("L12a" => lim),
+                                correctives = ["PST_T"], switchable = ["PST_T"],
+                                pst_limits = Dict("PST_T" => 50.0), contingencies = ["L_B"])
+    @test W.is_secure(ample)
+    @test !W.is_secure(tight)
+    # PST capped at 50 MW ⇒ post-corrective L12a = 200 − 50 = 150 MW against a 110 MW limit
+    @test tight.phi ≈ 150.0 / 110.0 - 1 atol = 5e-3
 end
 
 @testset "Base-only robust check (no contingency, no corrective action)" begin
