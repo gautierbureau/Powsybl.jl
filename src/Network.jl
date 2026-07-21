@@ -344,6 +344,10 @@ module Network
   """
   function clone_variant(network::NetworkHandle, src::String, variant::String; may_overwrite::Bool = true)
     LibPowsybl.clone_variant(network.handle, src, variant, may_overwrite)
+    return nothing
+  end
+
+  # ---------------------------------------------------------------------------
   # Element creation and update
   #
   # The API mirrors pypowsybl: pass one keyword argument per column, each value
@@ -601,6 +605,8 @@ module Network
     series_array = LibPowsybl.get_bus_breaker_view_elements(network.handle, voltage_level_id)
     return create_dataframe_from_series_array(series_array[])
   end
+
+  """
       update_elements(network, element_type; kwargs...)
 
   Update existing network elements of the given `element_type`. The `id` column selects
@@ -779,6 +785,9 @@ module Network
 
   function remove_extensions(network::NetworkHandle, extension_name::String, id::String)
     return remove_extensions(network, extension_name, [id])
+  end
+
+  # ---------------------------------------------------------------------------
   # In-memory and probing I/O
   # ---------------------------------------------------------------------------
 
@@ -795,6 +804,15 @@ module Network
       handle = LibPowsybl.load_from_string(file_name, file_content,
                                            LibPowsybl.dict_to_string_string_map(parameters),
                                            StdVector{StdString}(post_processors))
+    return NetworkHandle(handle,
+        LibPowsybl.id(handle),
+        LibPowsybl.name(handle),
+        LibPowsybl.source_format(handle),
+        LibPowsybl.forecast_distance(handle),
+        LibPowsybl.case_date(handle))
+  end
+
+  # ---------------------------------------------------------------------------
   # Network composition (merge / sub-networks / reduce)
   # ---------------------------------------------------------------------------
 
@@ -840,6 +858,9 @@ module Network
   """
   function is_network_loadable(network_file::String)
       return LibPowsybl.is_network_loadable(network_file)
+  end
+
+  """
       merge(networks::AbstractVector{NetworkHandle}) -> NetworkHandle
       merge(network::NetworkHandle, others::NetworkHandle...) -> NetworkHandle
 

@@ -224,6 +224,8 @@ end
     @test Powsybl.Network.update_connectable_status(network, load_id, false) isa Bool
     @test Powsybl.Network.update_connectable_status(network, load_id, true) isa Bool
   end
+end
+
 @testset "Test security analysis provider names" begin
   @test !isempty(Powsybl.SecurityAnalysis.get_provider_names())
 end
@@ -256,6 +258,8 @@ end
 
   Powsybl.SecurityAnalysis.get_bus_results(result)
   Powsybl.SecurityAnalysis.get_three_windings_transformer_results(result)
+end
+
 @testset "Test sensitivity analysis provider names" begin
   @test !isempty(Powsybl.SensitivityAnalysis.get_provider_names())
 end
@@ -276,6 +280,8 @@ end
 
   references = Powsybl.SensitivityAnalysis.get_reference_matrix(result)
   @test length(references) == length(branches)
+end
+
 @testset "Test single line diagram" begin
   network = Powsybl.Network.create_ieee9()
   vl_id = Powsybl.Network.get_voltage_levels(network)[1, "id"]
@@ -308,6 +314,8 @@ end
   Powsybl.Diagram.write_network_area_diagram_svg(network, svg_file)
   @test isfile(svg_file)
   @test filesize(svg_file) > 0
+end
+
 @testset "Test element creation and update" begin
   network = Powsybl.Network.create_empty()
 
@@ -404,6 +412,8 @@ end
   @test "NGEN_NHV1" in Powsybl.Network.get_ratio_tap_changers(eurostag)[:, "id"]
   rtc_steps = Powsybl.Network.get_ratio_tap_changer_steps(eurostag)
   @test count(==("NGEN_NHV1"), rtc_steps[:, "id"]) == 3
+end
+
 @testset "Test reporting" begin
   report = Powsybl.Report.create_report_node()
 
@@ -447,6 +457,8 @@ end
 
   Powsybl.Log.clear()
   @test isempty(Powsybl.Log.get_messages())
+end
+
 @testset "Test network composition" begin
   be = Powsybl.Network.create_micro_grid_be()
   nl = Powsybl.Network.create_micro_grid_nl()
@@ -532,6 +544,8 @@ end
   @test isfile(json_path)
   @test filesize(json_path) > 0
   rm(json_path; force = true)
+end
+
 @testset "Test load flow parameters JSON round-trip" begin
   LF = Powsybl.LoadFlow
   parameters = LF.load_flow_parameters()
@@ -698,6 +712,8 @@ end
   N.create_voltage_levels(empty_nb; id = "VL1", substation_id = "S1",
                           topology_kind = "NODE_BREAKER", nominal_v = 400.0)
   @test_throws Exception N.remove_internal_connections(empty_nb; voltage_level_id = "VL1", node1 = 0, node2 = 1)
+end
+
 @testset "Test RAO (remedial action optimisation)" begin
   RAO = Powsybl.RAO
   network = Powsybl.Network.load("data/rao/rao_network.uct")
