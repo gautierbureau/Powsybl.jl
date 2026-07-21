@@ -67,20 +67,17 @@ module RAO
   end
 
   """
-  Editable RAO parameters. Build defaults with [`rao_parameters`](@ref), edit the fields,
-  and pass to [`run`](@ref). The nested sensitivity analysis parameters are kept at their
-  defaults (edit them through a dedicated JSON parameters file if needed).
+  The OpenRAO search-tree ("SearchTreeRao") parameters. In pypowsybl these live in an
+  optional extension: present only when a provider that uses them is configured (e.g. after
+  loading a parameters JSON that carries the extension), and absent on a plain default
+  `RaoParameters`. They are exposed here as an optional [`RaoParameters`](@ref) field so the
+  Julia API mirrors that model.
   """
-  mutable struct RaoParameters
-    objective_function_type::ObjectiveFunctionType
-    enforce_curative_security::Bool
+  mutable struct RaoSearchTreeParameters
     curative_min_obj_improvement::Float64
     solver::Solver
     relative_mip_gap::Float64
     solver_specific_parameters::String
-    pst_ra_min_impact_threshold::Float64
-    hvdc_ra_min_impact_threshold::Float64
-    injection_ra_min_impact_threshold::Float64
     max_mip_iterations::Int
     pst_sensitivity_threshold::Float64
     hvdc_sensitivity_threshold::Float64
@@ -89,34 +86,43 @@ module RAO
     ra_range_shrinking::RaRangeShrinking
     max_preventive_search_tree_depth::Int
     max_curative_search_tree_depth::Int
-    relative_min_impact_threshold::Float64
-    absolute_min_impact_threshold::Float64
+    predefined_combinations::Vector{Vector{String}}
     skip_actions_far_from_most_limiting_element::Bool
     max_number_of_boundaries_for_skipping_actions::Int
     available_cpus::Int
     execution_condition::ExecutionCondition
     hint_from_first_preventive_rao::Bool
-    do_not_optimize_curative_cnecs_for_tsos_without_cras::Bool
     load_flow_provider::String
     sensitivity_provider::String
     sensitivity_failure_overcost::Float64
-    predefined_combinations::Vector{Vector{String}}
-    provider_parameters::Dict{String, String}
   end
 
-  function _c_to_rao_parameters(c)
-    keys_vec = LibPowsybl.provider_parameters_keys(c)
-    values_vec = LibPowsybl.provider_parameters_values(c)
-    return RaoParameters(
-      ObjectiveFunctionType(LibPowsybl.objective_function_type(c)),
-      LibPowsybl.enforce_curative_security(c),
+  """
+  Editable RAO parameters. Build defaults with [`rao_parameters`](@ref), edit the fields,
+  and pass to [`run`](@ref). The OpenRAO search-tree parameters are an optional extension
+  ([`RaoSearchTreeParameters`](@ref)): `nothing` on defaults, populated when loaded from a
+  JSON that carries the extension.
+  """
+  mutable struct RaoParameters
+    objective_function_type::ObjectiveFunctionType
+    enforce_curative_security::Bool
+    pst_ra_min_impact_threshold::Float64
+    hvdc_ra_min_impact_threshold::Float64
+    injection_ra_min_impact_threshold::Float64
+    relative_min_impact_threshold::Float64
+    absolute_min_impact_threshold::Float64
+    do_not_optimize_curative_cnecs_for_tsos_without_cras::Bool
+    provider_parameters::Dict{String, String}
+    # Optional OpenRAO search-tree extension: `nothing` when absent, populated when present.
+    search_tree_parameters::Union{Nothing, RaoSearchTreeParameters}
+  end
+
+  function _search_tree_from_c(c)
+    return RaoSearchTreeParameters(
       LibPowsybl.curative_min_obj_improvement(c),
       Solver(LibPowsybl.solver(c)),
       LibPowsybl.relative_mip_gap(c),
       String(LibPowsybl.solver_specific_parameters(c)),
-      LibPowsybl.pst_ra_min_impact_threshold(c),
-      LibPowsybl.hvdc_ra_min_impact_threshold(c),
-      LibPowsybl.injection_ra_min_impact_threshold(c),
       Int(LibPowsybl.max_mip_iterations(c)),
       LibPowsybl.pst_sensitivity_threshold(c),
       LibPowsybl.hvdc_sensitivity_threshold(c),
@@ -125,54 +131,73 @@ module RAO
       RaRangeShrinking(LibPowsybl.ra_range_shrinking(c)),
       Int(LibPowsybl.max_preventive_search_tree_depth(c)),
       Int(LibPowsybl.max_curative_search_tree_depth(c)),
-      LibPowsybl.relative_min_impact_threshold(c),
-      LibPowsybl.absolute_min_impact_threshold(c),
+      Vector{String}[collect(String, split(String(group), '\t')) for group in LibPowsybl.predefined_combinations(c)],
       LibPowsybl.skip_actions_far_from_most_limiting_element(c),
       Int(LibPowsybl.max_number_of_boundaries_for_skipping_actions(c)),
       Int(LibPowsybl.available_cpus(c)),
       ExecutionCondition(LibPowsybl.execution_condition(c)),
       LibPowsybl.hint_from_first_preventive_rao(c),
-      LibPowsybl.do_not_optimize_curative_cnecs_for_tsos_without_cras(c),
       String(LibPowsybl.load_flow_provider(c)),
       String(LibPowsybl.sensitivity_provider(c)),
-      LibPowsybl.sensitivity_failure_overcost(c),
-      Vector{String}[collect(String, split(String(group), '\t')) for group in LibPowsybl.predefined_combinations(c)],
-      Dict{String, String}(String(k) => String(v) for (k, v) in zip(keys_vec, values_vec)))
+      LibPowsybl.sensitivity_failure_overcost(c))
+  end
+
+  function _c_to_rao_parameters(c)
+    keys_vec = LibPowsybl.provider_parameters_keys(c)
+    values_vec = LibPowsybl.provider_parameters_values(c)
+    # The search-tree fields are only meaningful (and only initialised on the C side) when
+    # the OpenRAO search-tree extension is present; otherwise expose them as `nothing`.
+    search_tree = LibPowsybl.search_tree_parameters_ext(c) ? _search_tree_from_c(c) : nothing
+    return RaoParameters(
+      ObjectiveFunctionType(LibPowsybl.objective_function_type(c)),
+      LibPowsybl.enforce_curative_security(c),
+      LibPowsybl.pst_ra_min_impact_threshold(c),
+      LibPowsybl.hvdc_ra_min_impact_threshold(c),
+      LibPowsybl.injection_ra_min_impact_threshold(c),
+      LibPowsybl.relative_min_impact_threshold(c),
+      LibPowsybl.absolute_min_impact_threshold(c),
+      LibPowsybl.do_not_optimize_curative_cnecs_for_tsos_without_cras(c),
+      Dict{String, String}(String(k) => String(v) for (k, v) in zip(keys_vec, values_vec)),
+      search_tree)
   end
 
   function _rao_parameters_to_c_struct(p::RaoParameters)
     c = LibPowsybl.RaoParameters()
     LibPowsybl.objective_function_type(c, LibPowsybl.RaoObjectiveFunctionType(p.objective_function_type))
     LibPowsybl.enforce_curative_security(c, p.enforce_curative_security)
-    LibPowsybl.curative_min_obj_improvement(c, p.curative_min_obj_improvement)
-    LibPowsybl.solver(c, LibPowsybl.RaoSolver(p.solver))
-    LibPowsybl.relative_mip_gap(c, p.relative_mip_gap)
-    LibPowsybl.solver_specific_parameters(c, p.solver_specific_parameters)
     LibPowsybl.pst_ra_min_impact_threshold(c, p.pst_ra_min_impact_threshold)
     LibPowsybl.hvdc_ra_min_impact_threshold(c, p.hvdc_ra_min_impact_threshold)
     LibPowsybl.injection_ra_min_impact_threshold(c, p.injection_ra_min_impact_threshold)
-    LibPowsybl.max_mip_iterations(c, Cint(p.max_mip_iterations))
-    LibPowsybl.pst_sensitivity_threshold(c, p.pst_sensitivity_threshold)
-    LibPowsybl.hvdc_sensitivity_threshold(c, p.hvdc_sensitivity_threshold)
-    LibPowsybl.injection_ra_sensitivity_threshold(c, p.injection_ra_sensitivity_threshold)
-    LibPowsybl.pst_model(c, LibPowsybl.RaoPstModel(p.pst_model))
-    LibPowsybl.ra_range_shrinking(c, LibPowsybl.RaRangeShrinking(p.ra_range_shrinking))
-    LibPowsybl.max_preventive_search_tree_depth(c, Cint(p.max_preventive_search_tree_depth))
-    LibPowsybl.max_curative_search_tree_depth(c, Cint(p.max_curative_search_tree_depth))
     LibPowsybl.relative_min_impact_threshold(c, p.relative_min_impact_threshold)
     LibPowsybl.absolute_min_impact_threshold(c, p.absolute_min_impact_threshold)
-    LibPowsybl.skip_actions_far_from_most_limiting_element(c, p.skip_actions_far_from_most_limiting_element)
-    LibPowsybl.max_number_of_boundaries_for_skipping_actions(c, Cint(p.max_number_of_boundaries_for_skipping_actions))
-    LibPowsybl.available_cpus(c, Cint(p.available_cpus))
-    LibPowsybl.execution_condition(c, LibPowsybl.RaoExecutionCondition(p.execution_condition))
-    LibPowsybl.hint_from_first_preventive_rao(c, p.hint_from_first_preventive_rao)
     LibPowsybl.do_not_optimize_curative_cnecs_for_tsos_without_cras(c, p.do_not_optimize_curative_cnecs_for_tsos_without_cras)
-    LibPowsybl.load_flow_provider(c, p.load_flow_provider)
-    LibPowsybl.sensitivity_provider(c, p.sensitivity_provider)
-    LibPowsybl.sensitivity_failure_overcost(c, p.sensitivity_failure_overcost)
-    LibPowsybl.predefined_combinations(c, StdVector{StdString}([join(combo, '\t') for combo in p.predefined_combinations]))
     LibPowsybl.provider_parameters_keys(c, StdVector{StdString}(collect(keys(p.provider_parameters))))
     LibPowsybl.provider_parameters_values(c, StdVector{StdString}(collect(values(p.provider_parameters))))
+    st = p.search_tree_parameters
+    LibPowsybl.search_tree_parameters_ext(c, st !== nothing)
+    if st !== nothing
+      LibPowsybl.curative_min_obj_improvement(c, st.curative_min_obj_improvement)
+      LibPowsybl.solver(c, LibPowsybl.RaoSolver(st.solver))
+      LibPowsybl.relative_mip_gap(c, st.relative_mip_gap)
+      LibPowsybl.solver_specific_parameters(c, st.solver_specific_parameters)
+      LibPowsybl.max_mip_iterations(c, Cint(st.max_mip_iterations))
+      LibPowsybl.pst_sensitivity_threshold(c, st.pst_sensitivity_threshold)
+      LibPowsybl.hvdc_sensitivity_threshold(c, st.hvdc_sensitivity_threshold)
+      LibPowsybl.injection_ra_sensitivity_threshold(c, st.injection_ra_sensitivity_threshold)
+      LibPowsybl.pst_model(c, LibPowsybl.RaoPstModel(st.pst_model))
+      LibPowsybl.ra_range_shrinking(c, LibPowsybl.RaRangeShrinking(st.ra_range_shrinking))
+      LibPowsybl.max_preventive_search_tree_depth(c, Cint(st.max_preventive_search_tree_depth))
+      LibPowsybl.max_curative_search_tree_depth(c, Cint(st.max_curative_search_tree_depth))
+      LibPowsybl.predefined_combinations(c, StdVector{StdString}([join(combo, '\t') for combo in st.predefined_combinations]))
+      LibPowsybl.skip_actions_far_from_most_limiting_element(c, st.skip_actions_far_from_most_limiting_element)
+      LibPowsybl.max_number_of_boundaries_for_skipping_actions(c, Cint(st.max_number_of_boundaries_for_skipping_actions))
+      LibPowsybl.available_cpus(c, Cint(st.available_cpus))
+      LibPowsybl.execution_condition(c, LibPowsybl.RaoExecutionCondition(st.execution_condition))
+      LibPowsybl.hint_from_first_preventive_rao(c, st.hint_from_first_preventive_rao)
+      LibPowsybl.load_flow_provider(c, st.load_flow_provider)
+      LibPowsybl.sensitivity_provider(c, st.sensitivity_provider)
+      LibPowsybl.sensitivity_failure_overcost(c, st.sensitivity_failure_overcost)
+    end
     return c
   end
 

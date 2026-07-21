@@ -1355,6 +1355,10 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
        return pypowsybl::createRaoParameters();
     });
   raoParametersMapper
+    // Whether the OpenRAO search-tree extension is present. When it is not (as on a plain
+    // `new RaoParameters()`), the search-tree fields below are not populated, so the Julia
+    // side reads this flag to decide whether to expose them (mirroring pypowsybl).
+    .method_readwrite("search_tree_parameters_ext", &pypowsybl::RaoParameters::search_tree_parameters_ext)
     .method_readwrite("objective_function_type", &pypowsybl::RaoParameters::objective_function_type)
     .method_readwrite("enforce_curative_security", &pypowsybl::RaoParameters::enforce_curative_security)
     .method_readwrite("curative_min_obj_improvement", &pypowsybl::RaoParameters::curative_min_obj_improvement)
