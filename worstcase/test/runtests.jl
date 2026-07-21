@@ -12,16 +12,17 @@ const W = PowsyblWorstCase
 const NET = Powsybl.Network
 Powsybl.LibPowsybl.set_config_read(false)
 
-# pst_focus fixture: two parallel B1→B2b paths, one direct (L12a), one via the PST
-# (L1_2a → PST_T), merging at B2b and exiting to B3 via L2b_3. G1 at B1, G2 + 250 MW load at B3.
-function build_pst_network()
+# pst_focus + a parallel direct line L_B (B1 → B3): two corridors from B1 to B3, one via the PST
+# (L1_2a → PST_T → B2b → L2b_3), one direct (L_B). Outaging L_B forces all power through the PST
+# corridor, overloading L12a — a contingency the *post-corrective* PST can relieve.
+function build_ext()
     KV = 400.0; BASE = 100.0; ZB = KV^2 / BASE
     x_of(b) = BASE / b * ZB
-    net = NET.create_empty("pst_focus")
+    net = NET.create_empty("pst_focus_ext")
     NET.create_substations(net; id = ["S1", "S2", "S3"], country = ["FR", "FR", "FR"])
     NET.create_voltage_levels(net; id = ["VL1", "VL2a", "VL2b", "VL3"],
-        substation_id = ["S1", "S2", "S2", "S3"],
-        topology_kind = fill("BUS_BREAKER", 4), nominal_v = fill(KV, 4))
+        substation_id = ["S1", "S2", "S2", "S3"], topology_kind = fill("BUS_BREAKER", 4),
+        nominal_v = fill(KV, 4))
     NET.create_buses(net; id = ["B1", "B2a", "B2b", "B3"],
         voltage_level_id = ["VL1", "VL2a", "VL2b", "VL3"])
     NET.create_lines(net; id = ["L12a"], voltage_level1_id = ["VL1"], bus1_id = ["B1"],
@@ -32,6 +33,9 @@ function build_pst_network()
         g1 = [0.0], b1 = [0.0], g2 = [0.0], b2 = [0.0])
     NET.create_lines(net; id = ["L2b_3"], voltage_level1_id = ["VL2b"], bus1_id = ["B2b"],
         voltage_level2_id = ["VL3"], bus2_id = ["B3"], r = [0.0], x = [x_of(BASE / 0.2)],
+        g1 = [0.0], b1 = [0.0], g2 = [0.0], b2 = [0.0])
+    NET.create_lines(net; id = ["L_B"], voltage_level1_id = ["VL1"], bus1_id = ["B1"],
+        voltage_level2_id = ["VL3"], bus2_id = ["B3"], r = [0.0], x = [x_of(300.0)],
         g1 = [0.0], b1 = [0.0], g2 = [0.0], b2 = [0.0])
     NET.create_2_windings_transformers(net; id = ["PST_T"],
         voltage_level1_id = ["VL2a"], bus1_id = ["B2a"], voltage_level2_id = ["VL2b"], bus2_id = ["B2b"],
@@ -49,58 +53,68 @@ function build_pst_network()
     return net
 end
 
-# Extra load at B3 (bus VL3_0): injection deviation in [-100, 0] MW.
-const UNCERTAIN = Dict("VL3_0" => (-100.0, 0.0))
+const NO_UNC = Dict("VL3_0" => (0.0, 0.0))   # isolate the contingency mechanics
+# Base ≈ 70.4 MW on L12a; the N-1 (L_B out) state routes the full 200 MW through the corridor,
+# giving L12a ≈ 142.86 MW (a 0.2987 pu overload against a 110 MW limit).
+const N1_OVERLOAD = 200.0 * 500 / 700 / 110 - 1     # ≈ 0.2987
 
-@testset "GridModel extraction" begin
-    gm = W.GridModel(build_pst_network())
-    @test gm.slack == "VL1_0"                    # G1's bus
-    @test gm.injection["VL1_0"] ≈ 200.0          # G1 target
-    @test gm.injection["VL3_0"] ≈ -200.0         # G2 (50) − load (250)
+@testset "GridModel extraction (α⁰ from current tap)" begin
+    gm = W.GridModel(build_ext())
     ids = Dict(b.id => b for b in gm.branches)
-    @test ids["L12a"].h ≈ 500.0                  # V²/x = 400²/320
-    @test ids["PST_T"].h ≈ 1000.0
+    @test Set(keys(ids)) == Set(["L12a", "L1_2a", "L2b_3", "L_B", "PST_T"])
     @test ids["PST_T"].is_pst
+    @test ids["PST_T"].alpha0 ≈ 0.0 atol = 1e-9         # neutral tap ⇒ preventive angle 0
     @test rad2deg(ids["PST_T"].alpha_max) ≈ 30.0 atol = 1e-6
-    @test rad2deg(ids["PST_T"].alpha_min) ≈ -30.0 atol = 1e-6
+    @test ids["L_B"].h ≈ 300.0
 end
 
-@testset "Insecure: PST cannot fully relieve the worst case" begin
-    net = build_pst_network()
-    sol = W.worst_case_oracle(net; uncertain = UNCERTAIN, monitored = Dict("L12a" => 110.0),
-                              correctives = ["PST_T"])
-    @test !W.is_secure(sol)
-    @test sol.phi > 0
-    @test sol.phi ≈ 0.268 atol = 5e-3            # 26.8% residual overload after best correction
-    @test sol.worst_injection["VL3_0"] ≈ -100.0 atol = 1e-3   # worst = maximal extra load (a vertex)
-    @test rad2deg(sol.corrective["PST_T"]) ≈ 30.0 atol = 1e-2 # PST driven to its bound
-    @test sol.upper_bound - sol.lower_bound <= 1e-4           # the min-max bracket closed
-end
-
-@testset "Secure: a looser limit is coverable by correction" begin
-    net = build_pst_network()
-    sol = W.worst_case_oracle(net; uncertain = UNCERTAIN, monitored = Dict("L12a" => 150.0),
-                              correctives = ["PST_T"])
+@testset "N-1 temporary rating + post-corrective recourse ⇒ secure" begin
+    # base 110, N-1 temporary rating 150 (absorbs the 142.9 briefly), post-corrective 110.
+    lim = (base = 110.0, contingency = 150.0, corrective = 110.0)
+    sol = W.worst_case_oracle(build_ext(); uncertain = NO_UNC, monitored = Dict("L12a" => lim),
+                              correctives = ["PST_T"], contingencies = ["L_B"])
     @test W.is_secure(sol)
     @test sol.phi < 0
+    # the corrective PST is driven to its bound in the post-corrective state of L_B
+    @test rad2deg(sol.corrective["L_B"]["PST_T"]) ≈ 30.0 atol = 1e-2
 end
 
-@testset "Corrective control strictly reduces the worst-case overload" begin
-    net = build_pst_network()
-    with_pst = W.worst_case_oracle(net; uncertain = UNCERTAIN, monitored = Dict("L12a" => 110.0),
-                                   correctives = ["PST_T"])
-    no_ctrl = W.worst_case_oracle(net; uncertain = UNCERTAIN, monitored = Dict("L12a" => 110.0),
-                                  correctives = String[])
-    @test no_ctrl.phi ≈ 0.948 atol = 5e-3        # 94.8% overload with the reactance split, no PST
-    @test with_pst.phi < no_ctrl.phi - 0.5       # the PST removes ~68 percentage points
-end
-
-@testset "N-1: contingency severs the PST path" begin
-    # Outage L1_2a isolates B2a (dead-end via PST_T only), so the PST can carry no flow and all
-    # power routes through L12a — a strictly worse, uncorrectable state.
-    net = build_pst_network()
-    sol = W.worst_case_oracle(net; uncertain = UNCERTAIN, monitored = Dict("L12a" => 110.0),
-                              correctives = ["PST_T"], contingencies = ["L1_2a"])
+@testset "Without correction the post-corrective state is insecure" begin
+    lim = (base = 110.0, contingency = 150.0, corrective = 110.0)
+    sol = W.worst_case_oracle(build_ext(); uncertain = NO_UNC, monitored = Dict("L12a" => lim),
+                              correctives = String[], contingencies = ["L_B"])
     @test !W.is_secure(sol)
-    @test sol.phi ≈ 300.0 / 110.0 - 1 atol = 1e-2   # full 300 MW on L12a in the N-1 state
+    @test sol.phi ≈ N1_OVERLOAD atol = 1e-3            # post-corrective at α⁰ still overloads
+end
+
+@testset "Correctives do not act in the pre-corrective N-1 state" begin
+    # A single (permanent) limit in every state: the N-1 pre-corrective overload (142.9 > 110)
+    # binds and cannot be corrected, so even with the PST the grid is insecure.
+    sol = W.worst_case_oracle(build_ext(); uncertain = NO_UNC, monitored = Dict("L12a" => 110.0),
+                              correctives = ["PST_T"], contingencies = ["L_B"])
+    @test !W.is_secure(sol)
+    @test sol.phi ≈ N1_OVERLOAD atol = 1e-3
+end
+
+@testset "Correctives do not rescue the base state" begin
+    # Base limit tightened below the base flow (≈70.4 MW): the base state overloads, and since
+    # correctives act only post-contingency, no PST action can fix it.
+    lim = (base = 55.0, contingency = 150.0, corrective = 110.0)
+    sol = W.worst_case_oracle(build_ext(); uncertain = NO_UNC, monitored = Dict("L12a" => lim),
+                              correctives = ["PST_T"], contingencies = ["L_B"])
+    @test !W.is_secure(sol)
+    @test sol.phi ≈ 200.0 * 500 / 700 * (291.67 / 591.67) / 55 - 1 atol = 5e-3   # base ≈ 70.4/55 − 1
+end
+
+@testset "Base-only robust check (no contingency, no corrective action)" begin
+    # With no contingency there is no post-corrective state, so the PST cannot act; extra load
+    # that overloads L12a in the base state is therefore uncorrectable.
+    unc = Dict("VL3_0" => (-150.0, 0.0))
+    tight = W.worst_case_oracle(build_ext(); uncertain = unc, monitored = Dict("L12a" => 90.0),
+                                correctives = ["PST_T"])
+    @test !W.is_secure(tight)
+    @test tight.worst_injection["VL3_0"] ≈ -150.0 atol = 1e-2   # worst = max extra load (a vertex)
+    loose = W.worst_case_oracle(build_ext(); uncertain = unc, monitored = Dict("L12a" => 300.0),
+                                correctives = ["PST_T"])
+    @test W.is_secure(loose)
 end

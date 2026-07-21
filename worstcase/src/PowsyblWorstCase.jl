@@ -10,29 +10,33 @@
 Worst-case (robust) security analysis of a power grid, on a DC network model, built on the
 Powsybl.jl APIs with JuMP + HiGHS.
 
-This implements the **feasibility oracle** of the three-level worst-case formulation: for a
-*fixed* preventive dispatch and a set of monitored states (base **N** plus **N-1**
-contingencies), decide whether the grid stays within its branch limits under the *worst*
-realisation of injection uncertainty, allowing *corrective* control (phase-shifting
-transformer set points) to respond after the uncertainty is known. Formally it evaluates the
-medial-level program
+This implements the **feasibility oracle** of the three-level worst-case formulation, with the
+four operating **states** of the reference model:
 
-    φ = max_{v ∈ V}  min_{u_c ∈ U_c}  max_{(e, s)}  ( |P_{e,s}(v, u_c)| / P̂_{e,s} − 1 )
+* **0 (nominal)** — forecast injections, no contingency, PST at its preventive angle `α⁰`.
+* **N (base)** — pre-contingency but *with* uncertainty; PST still at `α⁰` (no corrective yet).
+* **N-1 (post-contingency)** — after a contingency, with uncertainty, *before* correction (`α⁰`).
+* **N-1/c (post-corrective)** — after a contingency, with uncertainty *and* the corrective PST
+  action. Corrective actions are **per-contingency recourse**: you observe which contingency
+  occurred, then choose the correction.
 
-where `v` is the uncertain injection deviation, `u_c` the corrective PST angles, and the inner
-`max` is the worst per-unit overload over every monitored branch `e` and state `s`. The grid is
-**secure** iff `φ ≤ 0`: for every uncertainty there exists a corrective response keeping all
-flows within limits.
+For a fixed preventive dispatch it evaluates
 
-`φ` is a min-max (a saddle) and is solved by Falk–Hoffman-style discretization
-([`worst_case_oracle`](@ref)): a mixed-integer *relaxed medial* problem (the uncertainty
-maximises the worst overload against a growing menu of corrective candidates) alternating with
-a linear *corrective response* problem (the correctives minimise the worst overload for the
-current worst uncertainty), until the bounds meet.
+    φ = max_{v ∈ V}  min_{u_c ∈ U_c}  max_{(e, s)}  ( |P_{e,s}(v, u_c)| / P̂_{e,s}^{s} − 1 )
 
-Scope of this first slice: uncertainty = injection deviations at chosen buses; correctives =
-continuous PST phase angles; states = base + single-branch N-1 outages. The richer
-integer-mode PST/HVDC models, topology switching and redispatch are deliberately left out.
+where `v` is the uncertain injection deviation, `u_c` the per-contingency corrective PST angles
+(acting only in the post-corrective states), and the inner `max` is the worst per-unit overload
+over every monitored branch `e` and state `s`, each with its own (possibly state-dependent)
+limit `P̂^{s}`. The grid is **secure** iff `φ ≤ 0`.
+
+`φ` is a min-max and is solved by Falk–Hoffman-style discretization ([`worst_case_oracle`](@ref)):
+a mixed-integer *relaxed medial* problem (uncertainty maximises the worst overload against a
+growing menu of corrective candidates) alternating with a linear *corrective response* problem,
+until the bounds meet.
+
+Scope: uncertainty = injection deviations; correctives = continuous PST phase angles; states =
+nominal + base + per-contingency N-1 / N-1/c. The integer-mode PST/HVDC models, topology
+switching and redispatch are left out.
 """
 module PowsyblWorstCase
 
@@ -54,7 +58,7 @@ struct Branch
     bus2::String
     h::Float64          # DC susceptance V²/x (MW/rad)
     is_pst::Bool
-    alpha0::Float64     # initial phase angle (rad); 0 for plain lines
+    alpha0::Float64     # preventive/initial phase angle (rad); 0 for plain lines
     alpha_min::Float64
     alpha_max::Float64
 end
@@ -64,7 +68,8 @@ end
 
 Extract a DC model from a Powsybl `network`: buses, a slack bus (its nodal balance is dropped
 and its angle fixed to 0), the forecast net injection per bus (`Σ gen.target_p − Σ load.p0`),
-and the branches (lines and phase-shifting transformers) with their DC susceptance `h = V₂²/x`.
+and the branches (lines and phase-shifting transformers) with their DC susceptance `h = V₂²/x`,
+preventive angle `α⁰` (from the current tap) and corrective angle range.
 """
 struct GridModel
     buses::Vector{String}
@@ -82,28 +87,25 @@ function GridModel(network; slack::Union{Nothing,String} = nothing)
     lines = NET.get_lines(network, true)
     tfos  = NET.get_2_windings_transformers(network, true)
     psts  = NET.get_phase_tap_changers(network, true)
+    steps = NET.get_phase_tap_changer_steps(network, true)
     vls   = NET.get_voltage_levels(network, true)
 
     nominal_v = Dict(vls[i, :id] => vls[i, :nominal_v] for i in _rows(vls))
     bus_ids = collect(buses.id)
 
     injection = Dict(b => 0.0 for b in bus_ids)
-    for i in _rows(gens)
-        injection[gens[i, :bus_id]] += gens[i, :target_p]
-    end
-    for i in _rows(loads)
-        injection[loads[i, :bus_id]] -= loads[i, :p0]
-    end
+    for i in _rows(gens); injection[gens[i, :bus_id]] += gens[i, :target_p]; end
+    for i in _rows(loads); injection[loads[i, :bus_id]] -= loads[i, :p0]; end
 
     pst_ids = Set(collect(psts.id))
-    # phase-angle bounds per PST come from its step table (min/max alpha, in degrees → rad)
-    steps = NET.get_phase_tap_changer_steps(network, true)
-    amin = Dict{String,Float64}(); amax = Dict{String,Float64}()
+    # step angles per PST, in tap order (low → high); plus min/max and the current-tap angle.
+    alphas = Dict{String,Vector{Float64}}()
     for i in _rows(steps)
-        id = steps[i, :id]; a = deg2rad(steps[i, :alpha])
-        amin[id] = haskey(amin, id) ? min(amin[id], a) : a
-        amax[id] = haskey(amax, id) ? max(amax[id], a) : a
+        push!(get!(alphas, steps[i, :id], Float64[]), deg2rad(steps[i, :alpha]))
     end
+    tap = Dict(psts[i, :id] => psts[i, :tap] for i in _rows(psts))
+    lowtap = Dict(psts[i, :id] => psts[i, :low_tap] for i in _rows(psts))
+    alpha0 = Dict(id => a[tap[id] - lowtap[id] + 1] for (id, a) in alphas)
 
     branches = Branch[]
     for i in _rows(lines)
@@ -115,14 +117,17 @@ function GridModel(network; slack::Union{Nothing,String} = nothing)
         id = tfos[i, :id]
         v2 = nominal_v[tfos[i, :voltage_level2_id]]
         is_pst = id in pst_ids
+        a = get(alphas, id, Float64[0.0])
         push!(branches, Branch(id, tfos[i, :bus1_id], tfos[i, :bus2_id],
-                               v2^2 / tfos[i, :x_at_current_tap], is_pst, 0.0,
-                               get(amin, id, 0.0), get(amax, id, 0.0)))
+                               v2^2 / tfos[i, :x_at_current_tap], is_pst,
+                               get(alpha0, id, 0.0), minimum(a), maximum(a)))
     end
 
     sl = slack === nothing ? (isempty(gens.id) ? bus_ids[1] : gens[1, :bus_id]) : slack
     return GridModel(bus_ids, sl, injection, branches)
 end
+
+_pst_alpha0(gm::GridModel) = Dict(b.id => b.alpha0 for b in gm.branches if b.is_pst)
 
 # ---------------------------------------------------------------------------
 # Result
@@ -131,9 +136,9 @@ end
     WorstCaseSolution
 
 * `phi`            — the worst achievable overload `max_v min_{u_c} max_{e,s}` (`> 0` ⇒ insecure).
-* `secure`         — whether `phi ≤ tol` (every uncertainty can be corrected within limits).
+* `secure`         — whether `phi ≤ tol`.
 * `worst_injection`— the worst-case injection deviation `v*` per uncertain bus (MW).
-* `corrective`     — the best corrective PST angles for `v*` (rad).
+* `corrective`     — the best corrective PST angles (rad), per contingency: `Dict(cont => Dict(pst => α))`.
 * `iterations`     — Falk–Hoffman iterations.
 * `lower_bound`/`upper_bound` — the final bracket on `phi`.
 """
@@ -141,7 +146,7 @@ struct WorstCaseSolution
     phi::Float64
     secure::Bool
     worst_injection::Dict{String,Float64}
-    corrective::Dict{String,Float64}
+    corrective::Dict{String,Dict{String,Float64}}
     iterations::Int
     lower_bound::Float64
     upper_bound::Float64
@@ -150,25 +155,52 @@ end
 is_secure(sol::WorstCaseSolution) = sol.secure
 
 # ---------------------------------------------------------------------------
-# States and monitored overloads
+# States (the four-state model)
 # ---------------------------------------------------------------------------
-# A state is (name, outaged branch id or nothing). Its active branch set drops the outage.
-_states(contingencies) = vcat([(:N, nothing)], [(Symbol("N-1_", c), c) for c in contingencies])
+# A state carries its outaged branch, whether uncertainty is realised, and — for a
+# post-corrective state — the contingency whose corrective PST angles apply in it.
+struct State
+    name::String
+    kind::Symbol                       # :nominal | :base | :contingency | :corrective
+    outage::Union{Nothing,String}
+    uncertainty::Bool
+    corrective_for::Union{Nothing,String}
+end
+
+function _states(contingencies)
+    out = State[State("nominal", :nominal, nothing, false, nothing),
+                State("N", :base, nothing, true, nothing)]
+    for c in contingencies
+        push!(out, State("N-1[$c]", :contingency, c, true, nothing))
+        push!(out, State("N-1/c[$c]", :corrective, c, true, c))
+    end
+    return out
+end
+
 _active(gm::GridModel, out) = out === nothing ? gm.branches : filter(b -> b.id != out, gm.branches)
 
+# Per-state branch limit: a plain number applies to all states; a NamedTuple selects a limit by
+# state kind — `base` (used for nominal/base and as the fallback), optional `contingency`
+# (temporary N-1 rating) and `corrective` (post-corrective rating).
+_limit(v::Number, kind) = v
+function _limit(v::NamedTuple, kind)
+    kind === :contingency && haskey(v, :contingency) && return v.contingency
+    kind === :corrective && haskey(v, :corrective) && return v.corrective
+    return v.base
+end
+
 # ---------------------------------------------------------------------------
-# DC grid layer: add θ / flow variables and constraints to a model for one state.
-# `alpha` maps a PST id to its angle (a JuMP variable or a number); `inj` maps a bus to its
-# injection expression (number or AffExpr). Returns branch-id → flow variable.
+# DC grid layer for one state. `angle_of(pst_id)` returns the angle (variable or number) to use
+# for a PST *in this state*; `inj` maps a bus to its injection expression. Returns branch → flow.
 # ---------------------------------------------------------------------------
-function _add_state!(model, gm::GridModel, out, alpha, inj, tag)
+function _add_state!(model, gm::GridModel, out, angle_of, inj, tag)
     active = _active(gm, out)
     θ = Dict(b => @variable(model, base_name = "θ_$(tag)_$(b)") for b in gm.buses)
     fix(θ[gm.slack], 0.0; force = true)
     P = Dict{String,Any}()
     for br in active
         p = @variable(model, base_name = "P_$(tag)_$(br.id)")
-        shift = br.is_pst ? alpha[br.id] : 0.0
+        shift = br.is_pst ? angle_of(br.id) : 0.0
         @constraint(model, p == br.h * (θ[br.bus1] - θ[br.bus2] + shift))
         P[br.id] = p
     end
@@ -181,72 +213,86 @@ function _add_state!(model, gm::GridModel, out, alpha, inj, tag)
     return P
 end
 
-# Signed per-unit overloads (both directions) for the monitored branches present in a state.
-# Returns a vector of (label, expr) with expr = ±P/limit − 1.
-function _overloads(P, monitored, state_name)
-    out = Tuple{String,Any}[]
-    for (id, lim) in monitored
+# Signed per-unit overloads (both directions) for the monitored branches present in a state,
+# using that state's limit. Returns a vector of expressions ±P/P̂ − 1.
+function _overloads(P, monitored, kind)
+    out = Any[]
+    for (id, limspec) in monitored
         haskey(P, id) || continue
-        push!(out, ("$(id)@$(state_name)+", P[id] / lim - 1))
-        push!(out, ("$(id)@$(state_name)-", -P[id] / lim - 1))
+        lim = _limit(limspec, kind)
+        push!(out, P[id] / lim - 1)
+        push!(out, -P[id] / lim - 1)
     end
     return out
 end
 
-# ---------------------------------------------------------------------------
-# Corrective-response problem (LLP): min over correctives of the worst overload, for fixed v.
-# ---------------------------------------------------------------------------
-function _corrective_response(gm, states, monitored, correctives, vstar, opt, silent)
-    model = Model(opt); silent && set_silent(model)
-    alpha = Dict{String,Any}()
-    for br in gm.branches
-        br.is_pst || continue
-        if br.id in correctives
-            a = @variable(model, base_name = "α_$(br.id)")
-            set_lower_bound(a, br.alpha_min); set_upper_bound(a, br.alpha_max)
-            alpha[br.id] = a
-        else
-            alpha[br.id] = br.alpha0
+# Resolve the PST angle for a state, given the corrective angles available for its contingency.
+# `corr(pst_id)` returns the corrective angle (variable/number) or `nothing` if none applies.
+function _angle_of(gm, st::State, correctives, corr)
+    a0 = _pst_alpha0(gm)
+    return function (pst_id)
+        if st.kind === :corrective && pst_id in correctives
+            c = corr(pst_id)
+            c === nothing || return c
         end
+        return a0[pst_id]
+    end
+end
+
+# ---------------------------------------------------------------------------
+# Corrective-response problem (LLP): min over per-contingency correctives of the worst overload,
+# for a fixed uncertainty v*. Correctives act only in the post-corrective states.
+# ---------------------------------------------------------------------------
+function _corrective_response(gm, states, monitored, correctives, contingencies, vstar, opt, silent)
+    model = Model(opt); silent && set_silent(model)
+    ranges = Dict(b.id => (b.alpha_min, b.alpha_max) for b in gm.branches if b.is_pst)
+    α = Dict{Tuple{String,String},VariableRef}()
+    for c in contingencies, pid in correctives
+        a = @variable(model, base_name = "α_$(pid)_$(c)")
+        set_lower_bound(a, ranges[pid][1]); set_upper_bound(a, ranges[pid][2])
+        α[(pid, c)] = a
     end
     @variable(model, η)
-    for (name, out) in states
-        inj = Dict(n => gm.injection[n] + get(vstar, n, 0.0) for n in gm.buses)
-        P = _add_state!(model, gm, out, alpha, inj, name)
-        for (_, o) in _overloads(P, monitored, name)
+    for st in states
+        corr = pid -> (st.corrective_for === nothing ? nothing : get(α, (pid, st.corrective_for), nothing))
+        angle_of = _angle_of(gm, st, correctives, corr)
+        inj = Dict(n => gm.injection[n] + (st.uncertainty ? get(vstar, n, 0.0) : 0.0) for n in gm.buses)
+        P = _add_state!(model, gm, st.outage, angle_of, inj, st.name)
+        for o in _overloads(P, monitored, st.kind)
             @constraint(model, η >= o)
         end
     end
     @objective(model, Min, η)
     optimize!(model)
-    ac = Dict(id => value(alpha[id]) for id in correctives)
+    ac = Dict((pid, c) => value(α[(pid, c)]) for c in contingencies, pid in correctives)
     return objective_value(model), ac
 end
 
 # ---------------------------------------------------------------------------
-# Relaxed medial problem (MLP): the uncertainty maximises the worst overload against the current
-# menu of corrective candidates. A binary per candidate selects the binding overload (linearising
-# the max over branches/states); η is the min over candidates of that selected worst overload.
+# Relaxed medial problem (MLP): the uncertainty maximises the worst overload against a menu of
+# corrective candidates. A binary per candidate selects the binding (state, branch) overload.
 # ---------------------------------------------------------------------------
-function _relaxed_medial(gm, states, monitored, uncertain, candidates, bigM, opt, silent)
+function _relaxed_medial(gm, states, monitored, uncertain, correctives, contingencies,
+                         candidates, bigM, opt, silent)
     model = Model(opt); silent && set_silent(model)
     v = Dict{String,Any}()
     for (n, (lo, hi)) in uncertain
-        vn = @variable(model, base_name = "v_$(n)")
-        set_lower_bound(vn, lo); set_upper_bound(vn, hi)
+        vn = @variable(model, base_name = "v_$(n)"); set_lower_bound(vn, lo); set_upper_bound(vn, hi)
         v[n] = vn
     end
     @variable(model, η)
     for (j, cand) in enumerate(candidates)
-        alpha = Dict(br.id => (br.is_pst ? get(cand, br.id, br.alpha0) : 0.0) for br in gm.branches)
         sel = VariableRef[]
-        for (name, out) in states
-            inj = Dict(n => gm.injection[n] + (haskey(v, n) ? v[n] : 0.0) for n in gm.buses)
-            P = _add_state!(model, gm, out, alpha, inj, "c$(j)_$(name)")
-            for (_, o) in _overloads(P, monitored, name)
-                b = @variable(model, binary = true)
-                push!(sel, b)
-                @constraint(model, η <= o + bigM * (1 - b))   # η ≤ selected overload of candidate j
+        for st in states
+            corr = pid -> (st.corrective_for === nothing ? nothing :
+                           get(cand, (pid, st.corrective_for), nothing))
+            angle_of = _angle_of(gm, st, correctives, corr)
+            inj = Dict(n => gm.injection[n] + (st.uncertainty && haskey(v, n) ? v[n] : 0.0)
+                       for n in gm.buses)
+            P = _add_state!(model, gm, st.outage, angle_of, inj, "c$(j)_$(st.name)")
+            for o in _overloads(P, monitored, st.kind)
+                b = @variable(model, binary = true); push!(sel, b)
+                @constraint(model, η <= o + bigM * (1 - b))
             end
         end
         @constraint(model, sum(sel) == 1)
@@ -265,15 +311,17 @@ end
                       optimizer = HiGHS.Optimizer, tol = 1e-5, max_iter = 30,
                       bigM = 100.0, silent = true) -> WorstCaseSolution
 
-Evaluate the worst-case security oracle on `network`.
+Evaluate the worst-case security oracle on `network` over the four-state model.
 
 * `uncertain`  — `Dict(bus_id => (lo, hi))`: the injection-deviation range at each uncertain bus.
-* `monitored`  — `Dict(branch_id => limit)`: branches whose per-unit overload is policed.
-* `correctives`— PST ids usable as corrective control (their angle range comes from the network).
-* `contingencies` — branch ids to also consider as N-1 outages (base state is always included).
+* `monitored`  — `Dict(branch_id => limit)`, where `limit` is a number (all states) or a
+  `NamedTuple` `(; base, contingency, corrective)` of per-state limits.
+* `correctives`— PST ids usable as **post-contingency corrective** control (per-contingency recourse).
+* `contingencies` — branch ids to consider as N-1 outages. Correctives act only in the resulting
+  post-corrective states; the base state uses the preventive angle `α⁰`.
 
 Returns a [`WorstCaseSolution`](@ref); `secure` is `true` when the worst uncertainty can be kept
-within all limits by the correctives.
+within every state's limits.
 """
 function worst_case_oracle(network;
                            uncertain::AbstractDict, monitored::AbstractDict,
@@ -282,33 +330,38 @@ function worst_case_oracle(network;
                            optimizer = HiGHS.Optimizer, tol = 1e-5, max_iter = 30,
                            bigM = 100.0, silent = true)
     gm = GridModel(network; slack = slack)
-    states = _states(collect(contingencies))
+    conts = collect(String, contingencies)
     correctives = collect(String, correctives)
+    states = _states(conts)
 
-    # Initial corrective candidate: every PST at its initial angle.
-    candidates = [Dict(id => 0.0 for id in correctives)]
+    candidates = [Dict{Tuple{String,String},Float64}()]   # empty ⇒ all PSTs at α⁰
     best_lb = -Inf
     vstar = Dict(n => 0.0 for n in keys(uncertain))
-    corrective = Dict(id => 0.0 for id in correctives)
+    corrective = Dict{Tuple{String,String},Float64}()
     ub = Inf
     iterations = 0
 
     for k in 1:max_iter
         iterations = k
-        ub, vstar = _relaxed_medial(gm, states, monitored, uncertain, candidates, bigM, optimizer, silent)
-        lb, ac = _corrective_response(gm, states, monitored, correctives, vstar, optimizer, silent)
+        ub, vstar = _relaxed_medial(gm, states, monitored, uncertain, correctives, conts,
+                                    candidates, bigM, optimizer, silent)
+        lb, ac = _corrective_response(gm, states, monitored, correctives, conts, vstar, optimizer, silent)
         if lb > best_lb
             best_lb = lb
             corrective = ac
         end
-        if ub - lb <= tol
-            break
-        end
+        ub - lb <= tol && break
         push!(candidates, ac)
     end
 
+    # Group corrective angles per contingency for reporting.
+    corr_by_c = Dict{String,Dict{String,Float64}}()
+    for c in conts
+        corr_by_c[c] = Dict(pid => corrective[(pid, c)] for pid in correctives if haskey(corrective, (pid, c)))
+    end
+
     phi = best_lb
-    return WorstCaseSolution(phi, phi <= tol, vstar, corrective, iterations, best_lb, ub)
+    return WorstCaseSolution(phi, phi <= tol, vstar, corr_by_c, iterations, best_lb, ub)
 end
 
 end # module
