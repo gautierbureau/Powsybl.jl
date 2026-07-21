@@ -176,8 +176,8 @@ end
     # After the L_B outage the PST corridor carries ≈ 57.14 MW (= 200 · 320/1120). The full
     # automaton (pst_model) then decides, per contingency: stay inactive at α⁰, activate and
     # regulate toward ±P^tar once |P^{N-1}| ≥ P^act, or trip on over-current and propagate the
-    # trip forward. The PST is a physical device here (no free corrective), so its mode and
-    # connection are resolved cooperatively to the physical (maximally-connected) equilibrium.
+    # trip forward. The trip is pinned by the connected-reference over-current test, so the
+    # physical (maximally-connected) equilibrium is selected — no spurious disconnection.
     nat = 200.0 * 320 / 1120            # ≈ 57.14 MW PST corridor flow after L_B out
     orc(mon, pm) = W.worst_case_oracle(build_ext(); uncertain = NO_UNC, monitored = mon,
                                        contingencies = ["L_B"], pst_model = pm)
@@ -202,11 +202,69 @@ end
 
     # (4) no over-current (P^lim = 300 ≫ 57) and never activated: the PST stays connected at α⁰
     # and the corridor split leaves L12a ≈ 142.86 MW, within the 150 MW monitor. This is the
-    # case the local-consistency tie-break protects: a spurious "trip" (which would zero the
-    # corridor and satisfy the monitor) must be rejected in favour of the connected equilibrium.
+    # case the reference-flow trip test protects: a spurious "trip" (which would zero the
+    # corridor and satisfy the monitor) is impossible because |P_ref| = 57 < 300.
     stay = orc(monL, Dict("PST_T" => (p_lim = 300.0, p_act = 1000.0, p_tar = 200.0)))
     @test W.is_secure(stay)
     @test stay.phi ≈ (200.0 * 500 / 700) / 150.0 - 1 atol = 5e-3   # L12a ≈ 142.86 MW, PST stays
+end
+
+# Two B1→B3 corridors, each through a PST: corridor A via PST_T (full automaton) and corridor F
+# via PST_F (a *free* corrective the operator controls). Outaging L_B loads both corridors.
+function build_two_pst()
+    KV = 400.0; BASE = 100.0; ZB = KV^2 / BASE
+    x_of(b) = BASE / b * ZB
+    net = NET.create_empty("two_pst")
+    NET.create_substations(net; id = ["S1", "S2", "S3", "S4"], country = fill("FR", 4))
+    NET.create_voltage_levels(net; id = ["VL1", "VL2a", "VL2b", "VL3", "VL4a", "VL4b"],
+        substation_id = ["S1", "S2", "S2", "S3", "S4", "S4"], topology_kind = fill("BUS_BREAKER", 6),
+        nominal_v = fill(KV, 6))
+    NET.create_buses(net; id = ["B1", "B2a", "B2b", "B3", "B4a", "B4b"],
+        voltage_level_id = ["VL1", "VL2a", "VL2b", "VL3", "VL4a", "VL4b"])
+    for (id, v1, b1, v2, b2, xx) in [
+            ("L12a", "VL1", "B1", "VL2b", "B2b", x_of(BASE / 0.2)),
+            ("L1_2a", "VL1", "B1", "VL2a", "B2a", x_of(BASE / 0.4)),
+            ("L2b_3", "VL2b", "B2b", "VL3", "B3", x_of(BASE / 0.2)),
+            ("L1_4a", "VL1", "B1", "VL4a", "B4a", x_of(BASE / 0.4)),
+            ("L4b_3", "VL4b", "B4b", "VL3", "B3", x_of(BASE / 0.2)),
+            ("L_B", "VL1", "B1", "VL3", "B3", x_of(300.0))]
+        NET.create_lines(net; id = [id], voltage_level1_id = [v1], bus1_id = [b1],
+            voltage_level2_id = [v2], bus2_id = [b2], r = [0.0], x = [xx],
+            g1 = [0.0], b1 = [0.0], g2 = [0.0], b2 = [0.0])
+    end
+    NET.create_2_windings_transformers(net; id = ["PST_T", "PST_F"],
+        voltage_level1_id = ["VL2a", "VL4a"], bus1_id = ["B2a", "B4a"],
+        voltage_level2_id = ["VL2b", "VL4b"], bus2_id = ["B2b", "B4b"],
+        rated_u1 = fill(KV, 2), rated_u2 = fill(KV, 2), r = fill(0.0, 2),
+        x = fill(x_of(BASE / 0.1), 2), g = fill(0.0, 2), b = fill(0.0, 2))
+    n = 21; neutral = 10
+    for pid in ["PST_T", "PST_F"]
+        NET.create_phase_tap_changers(net; id = pid, low_tap = 0, tap = neutral,
+            regulation_mode = "CURRENT_LIMITER", regulating = false, target_deadband = 0.0,
+            steps = (id = fill(pid, n), alpha = [(i - neutral) * 3.0 for i in 0:(n-1)],
+                     rho = fill(1.0, n), r = zeros(n), x = zeros(n), g = zeros(n), b = zeros(n)))
+    end
+    NET.create_generators(net; id = ["G1", "G2"], voltage_level_id = ["VL1", "VL3"],
+        bus_id = ["B1", "B3"], energy_source = ["OTHER", "OTHER"], min_p = [0.0, 0.0],
+        max_p = [1000.0, 150.0], target_p = [200.0, 50.0], target_v = [KV, KV],
+        target_q = [0.0, 0.0], voltage_regulator_on = [true, false])
+    NET.create_loads(net; id = ["D3"], voltage_level_id = ["VL3"], bus_id = ["B3"], p0 = [250.0], q0 = [0.0])
+    return net
+end
+
+@testset "Full PST automaton composes with a free corrective (tight convergence)" begin
+    # PST_T is the full automaton; PST_F is a free corrective the medial discretizes. The trip
+    # of PST_T is pinned by its connected-reference over-current test — a *determined* function of
+    # the injection — so the relaxed-medial (max) can no longer fabricate a spurious PST_T
+    # disconnection to inflate its bound. The Falk–Hoffman bounds therefore meet.
+    mon = Dict("L12a" => (base = 1e4, contingency = 1e4, corrective = 130.0))
+    sol = W.worst_case_oracle(build_two_pst(); uncertain = Dict("VL3_0" => (-100.0, 0.0)),
+        monitored = mon, correctives = ["PST_F"], contingencies = ["L_B"],
+        pst_model = Dict("PST_T" => (p_lim = 300.0, p_act = 1000.0, p_tar = 200.0)))
+    @test W.is_secure(sol)
+    @test sol.upper_bound - sol.lower_bound ≤ 1e-4    # bounds meet: certificate is tight
+    @test sol.iterations < 10                          # converges quickly (vs. running to max_iter)
+    @test sol.phi ≈ -0.1694 atol = 5e-3
 end
 
 @testset "Base-only robust check (no contingency, no corrective action)" begin

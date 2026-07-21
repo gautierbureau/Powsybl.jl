@@ -75,12 +75,16 @@ Enable it per PST with
 pst_model = Dict("PST_T" => (p_lim = 300.0, p_act = 50.0, p_tar = 30.0))
 ```
 
-The over-current protection is **self-referential** — an open device decouples its buses, so the
+The over-current protection is **self-referential** — an open device decouples its buses, so its
 *would-be* natural flow can be arranged to exceed the rating and "justify" a spurious trip. Such
-a disconnected state is only **locally consistent** (Aachen Remark 1); the physical equilibrium
-is the one that keeps a device connected unless it genuinely over-currents. It is selected
-**lexicographically**: among the consistent equilibria, minimise the number of disconnections
-first, then the overload.
+a disconnected state is only **locally consistent** (Aachen Remark 1). The physical equilibrium
+is pinned by a **connected-reference flow**: each state is solved a second time with every
+full-PST forced connected at α⁰, and the over-current test is justified against *that* flow. Since
+the reference has no disconnection binaries, it is a **determined** function of the injection, so
+the trip decision is fixed identically in the max (relaxed-medial) and min (corrective-response)
+problems — the adversary cannot fabricate a trip, and the min player cannot dodge one. This makes
+the automaton compose with **free** correctives: the Falk–Hoffman bounds meet instead of the
+medial's spurious disconnection holding the upper bound open.
 
 ## What it computes
 
@@ -135,8 +139,8 @@ nominal / N / N-1 / N-1/c with single-branch N-1 outages and per-state limits; t
 **participation-factor secondary frequency response** with generator-limit saturation;
 **integer-mode devices** — HVDC AC-emulation clamp and PST over-current disconnection; and the
 **full PST automaton** — activation, target regulation and over-current protection with forward
-trip propagation, its multiple equilibria resolved by the local-consistency tie-break. Deferred:
-the automaton's adversarial discretization when the full PST is combined with *free* correctives
-(the "ignore-discretization-point" consistency machinery for the min-max), topology switching
-(bus splitting), and the outer flexibility-maximisation objective (which turns this oracle into
-the full three-level program).
+trip propagation, its multiple equilibria resolved by the connected-reference trip test so it
+**composes with free correctives** (the medial and response agree, the bounds meet). Deferred:
+within-state trip cascades between *several* full-PSTs (the reference assumes a single acting
+device per corridor), topology switching (bus splitting), and the outer flexibility-maximisation
+objective (which turns this oracle into the full three-level program).

@@ -26,7 +26,8 @@ hard limit `±P^lim` (a 3-mode disjunction), and **PST over-current disconnectio
 PST either regulates within its rating `|P| ≤ P^lim` or trips to `P = 0`); and the **full PST
 automaton** — activation (`|P^{N-1}| ≥ P^act`), target regulation toward `±P^tar`, and
 over-current protection with forward trip propagation, whose multiple equilibria are resolved to
-the physical (maximally-connected) one by a lexicographic local-consistency tie-break.
+the physical one by a **connected-reference** trip test (deterministic in both the max and min
+problems, so the automaton composes with free correctives and the bounds meet).
 
 `φ` is solved by Falk–Hoffman-style discretization ([`worst_case_oracle`](@ref)).
 """
@@ -274,12 +275,15 @@ end
 function _add_state!(model, gm::GridModel, out, angle_of, open_of, plim_of, inj, drop_slack, M, tag;
                     pst_model = Dict{String,Any}(), st = nothing, ctx = nothing)
     active = _active(gm.branches, out)
+    full = Dict(br.id => br for br in active if br.kind === :pst && haskey(pst_model, br.id))
+    pref = isempty(full) ? Dict{String,Any}() :
+           _reference_flows!(model, gm, out, angle_of, open_of, plim_of, pst_model, inj, drop_slack, M, tag)
     θ = Dict(b => @variable(model, base_name = "θ_$(tag)_$(b)") for b in gm.buses)
     fix(θ[gm.slack], 0.0; force = true)
     P = Dict{String,Any}()
     for br in active
-        if br.kind === :pst && haskey(pst_model, br.id)
-            P[br.id] = _full_pst_flow!(model, br, θ, st, ctx, pst_model[br.id], M)
+        if haskey(full, br.id)
+            P[br.id] = _full_pst_flow!(model, br, θ, st, ctx, pst_model[br.id], M, pref[br.id])
         elseif br.kind === :pst
             op  = open_of(br.id)
             P[br.id] = _branch_flow!(model, br, θ, angle_of(br.id), op, plim_of(br.id, op), M)
@@ -300,9 +304,11 @@ end
 # Full PST automaton (Aachen §2.1.6): over-current protection with N→N-1→N-1/c trip
 # propagation, an activation threshold, and target regulation.
 # ---------------------------------------------------------------------------
-# Inactive branch: P = h·(Δθ + α⁰) within the rating, else trip (over-current, local consistency).
+# Inactive branch: P = h·(Δθ + α⁰) within the rating, else trip. The over-current test is
+# justified against the *connected-reference* flow `p_ref` (a determined quantity), not the
+# branch's own — possibly disconnected — angle, so a trip cannot be fabricated.
 # `conn_max` (a binary or nothing) forbids reconnection if a prior state tripped.
-function _inactive_flow!(model, br, Δθ, plim, M; conn_max = nothing)
+function _inactive_flow!(model, br, Δθ, plim, M, p_ref; conn_max = nothing)
     nat0 = br.h * (Δθ + br.alpha0)
     conn = @variable(model, binary = true); dhi = @variable(model, binary = true)
     dlo = @variable(model, binary = true);  dinh = @variable(model, binary = true)  # inherited trip
@@ -314,16 +320,16 @@ function _inactive_flow!(model, br, Δθ, plim, M; conn_max = nothing)
     end
     P = @variable(model)
     @constraint(model, P <= nat0 + M * (1 - conn)); @constraint(model, P >= nat0 - M * (1 - conn))  # conn ⇒ P = nat0
-    @constraint(model, nat0 <= plim + M * (1 - conn)); @constraint(model, nat0 >= -plim - M * (1 - conn))  # conn ⇒ |nat0| ≤ P^lim
+    @constraint(model, p_ref <= plim + M * (1 - conn)); @constraint(model, p_ref >= -plim - M * (1 - conn))  # conn ⇒ no over-current
     @constraint(model, P <= M * conn); @constraint(model, P >= -M * conn)                            # ¬conn ⇒ P = 0
-    @constraint(model, nat0 >= plim - M * (1 - dhi))                                                 # trip-high justified by over-current
-    @constraint(model, nat0 <= -plim + M * (1 - dlo))
+    @constraint(model, p_ref >= plim - M * (1 - dhi))                                                # trip-high justified by reference over-current
+    @constraint(model, p_ref <= -plim + M * (1 - dlo))
     return P, conn
 end
 
 # Active branch: regulate toward ±P^tar within the angle range (median of clamps), trip on
 # over-current. `reg` reproduces Aachen Eq. 5 modes 4–10 exactly.
-function _active_flow!(model, br, Δθ, plim, ptar, M; conn_max = nothing)
+function _active_flow!(model, br, Δθ, plim, ptar, M, p_ref; conn_max = nothing)
     lo = br.h * (Δθ + br.alpha_min); hi = br.h * (Δθ + br.alpha_max); nat0 = br.h * (Δθ + br.alpha0)
     reg = _clamp!(model, _clamp!(model, nat0, -ptar, ptar, M), lo, hi, M)
     conn = @variable(model, binary = true); dhi = @variable(model, binary = true)
@@ -336,29 +342,58 @@ function _active_flow!(model, br, Δθ, plim, ptar, M; conn_max = nothing)
     end
     P = @variable(model)
     @constraint(model, P <= reg + M * (1 - conn)); @constraint(model, P >= reg - M * (1 - conn))
-    @constraint(model, reg <= plim + M * (1 - conn)); @constraint(model, reg >= -plim - M * (1 - conn))
+    @constraint(model, reg <= plim + M * (1 - conn)); @constraint(model, reg >= -plim - M * (1 - conn))  # conn ⇒ regulated flow within rating
+    @constraint(model, p_ref <= plim + M * (1 - conn)); @constraint(model, p_ref >= -plim - M * (1 - conn))  # conn ⇒ no over-current
     @constraint(model, P <= M * conn); @constraint(model, P >= -M * conn)
-    @constraint(model, reg >= plim - M * (1 - dhi)); @constraint(model, reg <= -plim + M * (1 - dlo))
+    @constraint(model, p_ref >= plim - M * (1 - dhi)); @constraint(model, p_ref <= -plim + M * (1 - dlo))  # trip on reference over-current
     return P, conn
 end
 
-function _full_pst_flow!(model, br, θ, st::State, ctx, fp, M)
-    conns = get!(ctx, :conns, VariableRef[])
+# Connected-reference flow: a second DC solve of the same state with every full-PST forced
+# connected at α⁰ (a plain branch). Having no disconnection binaries, the reference flow of each
+# full-PST is a *determined* function of the injection (and the free correctives), so the
+# over-current test justified against it cannot be gamed by a spurious disconnected equilibrium.
+# The trip decision is thereby pinned identically in the medial (max) and the response (min).
+function _reference_flows!(model, gm, out, angle_of, open_of, plim_of, pst_model, inj, drop_slack, M, tag)
+    active = _active(gm.branches, out)
+    θ = Dict(b => @variable(model, base_name = "θref_$(tag)_$(b)") for b in gm.buses)
+    fix(θ[gm.slack], 0.0; force = true)
+    P = Dict{String,Any}(); Pref = Dict{String,Any}()
+    for br in active
+        if br.kind === :pst && haskey(pst_model, br.id)
+            p = @variable(model); @constraint(model, p == br.h * (θ[br.bus1] - θ[br.bus2] + br.alpha0))
+            P[br.id] = p; Pref[br.id] = p
+        elseif br.kind === :pst
+            op = open_of(br.id)
+            P[br.id] = _branch_flow!(model, br, θ, angle_of(br.id), op, plim_of(br.id, op), M)
+        else
+            P[br.id] = _branch_flow!(model, br, θ, 0.0, nothing, Inf, M)
+        end
+    end
+    for n in gm.buses
+        (drop_slack && n == gm.slack) && continue
+        out_flow = sum(P[br.id] for br in active if br.bus1 == n; init = AffExpr(0.0))
+        in_flow  = sum(P[br.id] for br in active if br.bus2 == n; init = AffExpr(0.0))
+        @constraint(model, out_flow - in_flow == inj[n])
+    end
+    return Pref
+end
+
+function _full_pst_flow!(model, br, θ, st::State, ctx, fp, M, p_ref)
     Δθ = θ[br.bus1] - θ[br.bus2]
     if st.kind === :nominal
-        P, c = _inactive_flow!(model, br, Δθ, fp.p_lim, M); push!(conns, c); return P
+        P, _ = _inactive_flow!(model, br, Δθ, fp.p_lim, M, p_ref); return P
     elseif st.kind === :base
-        P, conn = _inactive_flow!(model, br, Δθ, fp.p_lim, M); push!(conns, conn)
+        P, conn = _inactive_flow!(model, br, Δθ, fp.p_lim, M, p_ref)
         ctx[(br.id, :conn_N)] = conn; return P
     elseif st.kind === :contingency
-        P, conn = _inactive_flow!(model, br, Δθ, fp.p_lim, M; conn_max = ctx[(br.id, :conn_N)])
-        push!(conns, conn); ctx[(br.id, st.outage, :conn_N1)] = conn; ctx[(br.id, st.outage, :P_N1)] = P; return P
+        P, conn = _inactive_flow!(model, br, Δθ, fp.p_lim, M, p_ref; conn_max = ctx[(br.id, :conn_N)])
+        ctx[(br.id, st.outage, :conn_N1)] = conn; ctx[(br.id, st.outage, :P_N1)] = P; return P
     end
     # post-corrective (N-1/c): activation from |P^{N-1}| ≥ P^act, then active or inactive.
     conn_N1 = ctx[(br.id, st.corrective_for, :conn_N1)]; P_N1 = ctx[(br.id, st.corrective_for, :P_N1)]
-    P_ia, c_ia = _inactive_flow!(model, br, Δθ, fp.p_lim, M; conn_max = conn_N1)
-    P_a, c_a   = _active_flow!(model, br, Δθ, fp.p_lim, fp.p_tar, M; conn_max = conn_N1)
-    push!(conns, c_ia); push!(conns, c_a)
+    P_ia, _ = _inactive_flow!(model, br, Δθ, fp.p_lim, M, p_ref; conn_max = conn_N1)
+    P_a, _  = _active_flow!(model, br, Δθ, fp.p_lim, fp.p_tar, M, p_ref; conn_max = conn_N1)
     act = @variable(model, binary = true); sgn = @variable(model, binary = true)
     @constraint(model, P_N1 <= fp.p_act + M * act); @constraint(model, P_N1 >= -fp.p_act - M * act)   # ¬act ⇒ |P_N1| ≤ P^act
     @constraint(model, P_N1 >= fp.p_act - M * (1 - act) - M * (1 - sgn))                              # act ⇒ |P_N1| ≥ P^act
@@ -424,20 +459,6 @@ function _corrective_response(gm, states, monitored, correctives, switchable, co
         for o in _overloads(P, monitored, st.kind)
             @constraint(model, η >= o)
         end
-    end
-    # Connection-preference (Aachen Remark 1): the over-current protection of an inactive PST
-    # is self-referential — when the device is open its buses decouple, and the *would-be*
-    # natural flow can be arranged to exceed the rating, "justifying" a spurious trip. Such a
-    # disconnected state is only *locally* consistent; the physical equilibrium is the one that
-    # trips a device only when it genuinely over-currents while connected. We select it
-    # lexicographically: first minimise the number of disconnections (so a device stays
-    # connected whenever a connected equilibrium exists), then minimise the overload η.
-    conns = get(ctx, :conns, VariableRef[])
-    if !isempty(conns)
-        @objective(model, Min, sum(1 - c for c in conns))
-        optimize!(model)
-        dstar = objective_value(model)
-        @constraint(model, sum(1 - c for c in conns) <= dstar + 1e-6)
     end
     @objective(model, Min, η)
     optimize!(model)
@@ -509,7 +530,8 @@ Besides `uncertain`, `monitored`, `correctives`, `contingencies` and `participat
   protection automaton** (a physical device, not a free corrective): it activates once
   `|P^{N-1}| ≥ p_act`, then regulates toward `±p_tar`, and trips on over-current `|P| ≥ p_lim`
   with the trip propagating forward through the states. Its multiple (locally-consistent)
-  equilibria are resolved to the physical, maximally-connected one.
+  equilibria are resolved to the physical one by a connected-reference trip test, so the automaton
+  composes with the free `correctives` (the max/min bounds meet).
 """
 function worst_case_oracle(network;
                            uncertain::AbstractDict, monitored::AbstractDict,
@@ -538,11 +560,10 @@ function worst_case_oracle(network;
     iterations = 0
 
     # When the full-PST automaton is the acting device and there is no *free* corrective to
-    # discretize, the PST is part of the grid model. Its mode/connection binaries are resolved
-    # *cooperatively* (the physical device stays connected when it can, and regulates to help) —
-    # i.e. by the corrective-response (min) problem — while the worst uncertainty comes from the
-    # relaxed-medial (max) problem. A spurious "disconnected" equilibrium that is only locally
-    # consistent (Aachen Remark 1) is thereby rejected in favour of the connected one.
+    # discretize, the PST is part of the grid model and has no discretionary control. Its trip is
+    # pinned deterministically by the connected-reference over-current test (see
+    # `_reference_flows!`), so the relaxed-medial (max over uncertainty) and the corrective-response
+    # (physical evaluation) agree: a single pass suffices and the reported `φ` is the response value.
     if isempty(correctives) && isempty(switch)
         ub, vstar = _relaxed_medial(gm, states, monitored, uncertain, correctives, switch, conts,
                                     participation, pst_limits, pst_model, candidates, bigM, optimizer, silent, balance_bigM)
