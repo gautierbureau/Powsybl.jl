@@ -1,0 +1,22 @@
+name = "PowsyblWorstCase"
+uuid = "9a3e7c12-5d84-4b6f-8e21-7c0f9a1d3b48"
+authors = ["Powsybl.jl contributors"]
+version = "0.1.0"
+
+[deps]
+Powsybl = "cc5d7637-2d3a-48eb-b6d4-9415154f8200"
+JuMP = "4076af6c-e467-56ae-b986-b466b2749572"
+HiGHS = "87dc4568-4c63-4d18-b0c0-bb2238e4078b"
+DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+
+[compat]
+julia = "1.10"
+JuMP = "1"
+HiGHS = "1"
+DataFrames = "1"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
