@@ -106,6 +106,37 @@ end
     @test sol.phi ≈ 200.0 * 500 / 700 * (291.67 / 591.67) / 55 - 1 atol = 5e-3   # base ≈ 70.4/55 − 1
 end
 
+@testset "Secondary frequency response (participation factors)" begin
+    # Extra load up to 200 MW at B3, monitor L12a ≤ 110. Under a single slack (all pickup at B1)
+    # the whole imbalance flows down the corridor and overloads L12a; with a participation-factor
+    # response the local generator G2 shares the pickup, halving the corridor flow.
+    unc = Dict("VL3_0" => (-200.0, 0.0))
+    mon = Dict("L12a" => 110.0)
+    slack = W.worst_case_oracle(build_ext(); uncertain = unc, monitored = mon)
+    part  = W.worst_case_oracle(build_ext(); uncertain = unc, monitored = mon,
+                                participation = Dict("G1" => 1.0, "G2" => 1.0))
+    g1only = W.worst_case_oracle(build_ext(); uncertain = unc, monitored = mon,
+                                 participation = Dict("G1" => 1.0))
+
+    @test !W.is_secure(slack)
+    @test slack.phi ≈ 0.2804 atol = 5e-3
+    @test W.is_secure(part)                    # local sharing keeps L12a within its limit
+    @test part.phi ≈ -0.0397 atol = 5e-3
+    @test part.phi < slack.phi - 0.2           # the response strictly reduces the worst-case flow
+    @test g1only.phi ≈ slack.phi atol = 5e-3   # only G1 responds ⇒ equivalent to a single slack
+end
+
+@testset "Participation saturates at generator limits (mid clamp)" begin
+    # G2 has 100 MW of headroom (50 → 150 MW). Beyond ~200 MW of extra load it saturates, the
+    # response reverts toward the single slack, and a 250 MW excess is insecure again.
+    unc = Dict("VL3_0" => (-250.0, 0.0))
+    part = W.worst_case_oracle(build_ext(); uncertain = unc, monitored = Dict("L12a" => 110.0),
+                               participation = Dict("G1" => 1.0, "G2" => 1.0))
+    slack = W.worst_case_oracle(build_ext(); uncertain = unc, monitored = Dict("L12a" => 110.0))
+    @test !W.is_secure(part)                   # G2 capped ⇒ can no longer keep it secure
+    @test part.phi < slack.phi                 # but still helps partially vs. the single slack
+end
+
 @testset "Base-only robust check (no contingency, no corrective action)" begin
     # With no contingency there is no post-corrective state, so the PST cannot act; extra load
     # that overloads L12a in the base state is therefore uncorrectable.

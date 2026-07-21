@@ -28,6 +28,21 @@ recourse** (you observe which contingency occurred, then choose the correction).
 its own limit, so a branch may use a higher *temporary* rating in N-1 and a *permanent* rating
 in N-1/c.
 
+## Load balancing (secondary frequency response)
+
+The imbalance an uncertainty realisation creates is absorbed by the participating generators as
+a **secondary frequency response**: each participating generator settles at
+
+```
+P_g = mid( P_g⁻ ,  P_g⁰ + λ · f_g ,  P_g⁺ )
+```
+
+— its nominal output plus its participation factor `f_g` times a system-wide demand signal `λ`
+(the frequency-deviation proxy), **saturating** at its limits `[P_g⁻, P_g⁺]`. `λ` is set so the
+total response covers the imbalance. Modelled exactly (the `mid`/clamp is an MILP). Pass
+`participation = Dict(gen_id => f_g)`; omit it to keep a single slack bus (which unrealistically
+dumps the whole imbalance on one bus).
+
 ## What it computes
 
 ```
@@ -61,6 +76,7 @@ sol = worst_case_oracle(network;
     monitored     = Dict("L12a" => (base = 110.0, contingency = 150.0, corrective = 110.0)),
     correctives   = ["PST_T"],                       # PSTs usable as post-contingency correction
     contingencies = ["L_B"],                         # N-1 outages (nominal + base always included)
+    participation = Dict("G1" => 1.0, "G2" => 1.0),  # secondary frequency response (else single slack)
 )
 
 sol.phi     # worst achievable overload (> 0 ⇒ insecure)
@@ -76,7 +92,7 @@ nominal state and as the fallback).
 ## Scope (first slice)
 
 Uncertainty = injection deviations; correctives = **continuous PST angles**; the four states
-nominal / N / N-1 / N-1/c with single-branch N-1 outages and per-state limits. Deferred: the
-integer-mode PST/HVDC models, topology switching (bus splitting),
-redispatch/participation-factor balancing, and the outer flexibility-maximisation objective
-(which turns this oracle into the full three-level program).
+nominal / N / N-1 / N-1/c with single-branch N-1 outages and per-state limits; and the
+**participation-factor secondary frequency response** with generator-limit saturation. Deferred:
+the integer-mode PST/HVDC models, topology switching (bus splitting), and the outer
+flexibility-maximisation objective (which turns this oracle into the full three-level program).
