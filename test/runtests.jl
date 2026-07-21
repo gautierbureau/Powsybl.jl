@@ -725,33 +725,24 @@ end
   # This CRAC enables loop-flow computation, which needs a GLSK
   RAO.set_loopflow_glsk(rao, glsk)
 
-  # Default parameters expose editable, typed fields
+  # Default parameters carry no OpenRAO search-tree extension (as in pypowsybl)
   defaults = RAO.rao_parameters()
   @test defaults.objective_function_type == RAO.SECURE_FLOW
-  @test defaults.solver == RAO.CBC
-  @test defaults.load_flow_provider == "OpenLoadFlow"
+  @test defaults.search_tree_parameters === nothing
 
-  # Predefined topological RA combinations default to empty and round-trip as nested lists
-  @test RAO.rao_parameters().predefined_combinations == Vector{String}[]
-
-  # Parameters round-trip through JSON, preserving edited fields
-  edited = RAO.rao_parameters()
-  edited.objective_function_type = RAO.MAX_MIN_MARGIN
-  edited.max_mip_iterations = 5
-  edited.pst_model = RAO.APPROXIMATED_INTEGERS
-  edited.predefined_combinations = [["ra1", "ra2"], ["ra3"]]
-  json = RAO.parameters_to_json(edited)
-  @test occursin("MAX_MIN_MARGIN", json)
-  restored = RAO.parameters_from_json(json)
-  @test restored.objective_function_type == RAO.MAX_MIN_MARGIN
-  @test restored.max_mip_iterations == 5
-  @test restored.pst_model == RAO.APPROXIMATED_INTEGERS
-  @test restored.predefined_combinations == [["ra1", "ra2"], ["ra3"]]
-
-  # Load parameters into an editable struct and run the RAO with it
+  # Parameters loaded from a JSON that carries the extension expose the search-tree fields
   parameters = RAO.load_parameters("data/rao/rao_parameters.json")
   @test parameters.objective_function_type == RAO.MAX_MIN_MARGIN
-  result = RAO.run(rao, network, crac; parameters = parameters)
+  st = parameters.search_tree_parameters
+  @test st !== nothing
+  @test st.solver == RAO.CBC
+  @test st.max_mip_iterations == 10
+  @test st.pst_model == RAO.APPROXIMATED_INTEGERS
+  @test st.load_flow_provider == "OpenLoadFlow"
+  @test st.predefined_combinations == Vector{String}[]
+
+  # Run the RAO from the parameters file
+  result = RAO.run(rao, network, crac; parameters_file = "data/rao/rao_parameters.json")
 
   # The optimisation succeeds
   @test RAO.get_status(result) == RAO.DEFAULT
