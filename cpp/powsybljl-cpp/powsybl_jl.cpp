@@ -537,7 +537,9 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
     }, "Open or close a switch, returns true if the state was changed");
 
   mod.method("update_connectable_status", [] (pypowsybl::JavaHandle network, std::string const& id, bool connected) {
-            return pypowsybl::updateConnectableStatus(network, id, connected);
+            // pypowsybl 1.15.0 added allowDisconnectors / allowFictitious flags (both default
+            // to false in pypowsybl's own connect/disconnect API).
+            return pypowsybl::updateConnectableStatus(network, id, connected, false, false);
     }, "Connect or disconnect a connectable, returns true if the state was changed");
 
   mod.method("get_network_elements_ids", [] (pypowsybl::JavaHandle network, element_type type,
@@ -630,7 +632,10 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
                                           std::string const& provider, bool dc) {
             std::shared_ptr<pypowsybl::SecurityAnalysisParameters> parameters(pypowsybl::createSecurityAnalysisParameters());
             parameters->loadflow_parameters = loadflowParameters;
-            return pypowsybl::runSecurityAnalysis(analysisContext, network, *parameters, provider, dc, nullptr);
+            // Since pypowsybl 1.15.0 the DC flag is carried on the load flow parameters
+            // (runSecurityAnalysis no longer takes a separate dc argument).
+            parameters->loadflow_parameters.dc = dc;
+            return pypowsybl::runSecurityAnalysis(analysisContext, network, *parameters, provider, nullptr);
     }, "Run a security analysis");
 
   mod.method("run_security_analysis_report", [] (pypowsybl::JavaHandle analysisContext, pypowsybl::JavaHandle network,
@@ -638,7 +643,8 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
                                                  std::string const& provider, bool dc, pypowsybl::JavaHandle reportNode) {
             std::shared_ptr<pypowsybl::SecurityAnalysisParameters> parameters(pypowsybl::createSecurityAnalysisParameters());
             parameters->loadflow_parameters = loadflowParameters;
-            return pypowsybl::runSecurityAnalysis(analysisContext, network, *parameters, provider, dc, &reportNode);
+            parameters->loadflow_parameters.dc = dc;
+            return pypowsybl::runSecurityAnalysis(analysisContext, network, *parameters, provider, &reportNode);
     }, "Run a security analysis, collecting logs into a report node");
 
   mod.method("get_pre_contingency_result", [] (pypowsybl::JavaHandle result) {
@@ -995,7 +1001,11 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
 
   mod.method("run_load_flow_report", [] (const pypowsybl::JavaHandle& network, const pypowsybl::LoadFlowParameters& parameters,
                                          bool dc, const std::string& provider, pypowsybl::JavaHandle reportNode) {
-            pypowsybl::LoadFlowComponentResultArray* results = pypowsybl::runLoadFlow(network, dc, parameters, provider, &reportNode);
+            // Since pypowsybl 1.15.0 the DC flag is carried on the parameters (runLoadFlow
+            // no longer takes a separate dc argument); copy locally to set it.
+            pypowsybl::LoadFlowParameters dcParameters = parameters;
+            dcParameters.dc = dc;
+            pypowsybl::LoadFlowComponentResultArray* results = pypowsybl::runLoadFlow(network, dcParameters, provider, &reportNode);
             return powsybl_array_to_julia(results);
     }, "Run a load flow, collecting logs into a report node");
 
@@ -1307,15 +1317,6 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
   mod.set_const("RAO_OBJ_MAX_MIN_RELATIVE_MARGIN", pypowsybl::ObjectiveFunctionType::MAX_MIN_RELATIVE_MARGIN);
   mod.set_const("RAO_OBJ_MIN_COST", pypowsybl::ObjectiveFunctionType::MIN_COST);
 
-  mod.add_bits<pypowsybl::Unit>("RaoUnit", jlcxx::julia_type("CppEnum"));
-  mod.set_const("RAO_UNIT_AMPERE", pypowsybl::Unit::AMPERE);
-  mod.set_const("RAO_UNIT_DEGREE", pypowsybl::Unit::DEGREE);
-  mod.set_const("RAO_UNIT_MEGAWATT", pypowsybl::Unit::MEGAWATT);
-  mod.set_const("RAO_UNIT_KILOVOLT", pypowsybl::Unit::KILOVOLT);
-  mod.set_const("RAO_UNIT_PERCENT_IMAX", pypowsybl::Unit::PERCENT_IMAX);
-  mod.set_const("RAO_UNIT_TAP", pypowsybl::Unit::TAP);
-  mod.set_const("RAO_UNIT_SECTION_COUNT", pypowsybl::Unit::SECTION_COUNT);
-
   mod.add_bits<pypowsybl::Solver>("RaoSolver", jlcxx::julia_type("CppEnum"));
   mod.set_const("RAO_SOLVER_CBC", pypowsybl::Solver::CBC);
   mod.set_const("RAO_SOLVER_SCIP", pypowsybl::Solver::SCIP);
@@ -1344,7 +1345,6 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
     });
   raoParametersMapper
     .method_readwrite("objective_function_type", &pypowsybl::RaoParameters::objective_function_type)
-    .method_readwrite("unit", &pypowsybl::RaoParameters::unit)
     .method_readwrite("enforce_curative_security", &pypowsybl::RaoParameters::enforce_curative_security)
     .method_readwrite("curative_min_obj_improvement", &pypowsybl::RaoParameters::curative_min_obj_improvement)
     .method_readwrite("solver", &pypowsybl::RaoParameters::solver)

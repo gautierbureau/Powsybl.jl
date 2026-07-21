@@ -32,19 +32,6 @@ module RAO
   end
 
   """
-  Unit the objective function is expressed in.
-  """
-  @enum Unit begin
-    AMPERE = LibPowsybl.RAO_UNIT_AMPERE
-    DEGREE = LibPowsybl.RAO_UNIT_DEGREE
-    MEGAWATT = LibPowsybl.RAO_UNIT_MEGAWATT
-    KILOVOLT = LibPowsybl.RAO_UNIT_KILOVOLT
-    PERCENT_IMAX = LibPowsybl.RAO_UNIT_PERCENT_IMAX
-    TAP = LibPowsybl.RAO_UNIT_TAP
-    SECTION_COUNT = LibPowsybl.RAO_UNIT_SECTION_COUNT
-  end
-
-  """
   MILP solver used for range action optimisation.
   """
   @enum Solver begin
@@ -86,7 +73,6 @@ module RAO
   """
   mutable struct RaoParameters
     objective_function_type::ObjectiveFunctionType
-    unit::Unit
     enforce_curative_security::Bool
     curative_min_obj_improvement::Float64
     solver::Solver
@@ -123,7 +109,6 @@ module RAO
     values_vec = LibPowsybl.provider_parameters_values(c)
     return RaoParameters(
       ObjectiveFunctionType(LibPowsybl.objective_function_type(c)),
-      Unit(LibPowsybl.unit(c)),
       LibPowsybl.enforce_curative_security(c),
       LibPowsybl.curative_min_obj_improvement(c),
       Solver(LibPowsybl.solver(c)),
@@ -158,7 +143,6 @@ module RAO
   function _rao_parameters_to_c_struct(p::RaoParameters)
     c = LibPowsybl.RaoParameters()
     LibPowsybl.objective_function_type(c, LibPowsybl.RaoObjectiveFunctionType(p.objective_function_type))
-    LibPowsybl.unit(c, LibPowsybl.RaoUnit(p.unit))
     LibPowsybl.enforce_curative_security(c, p.enforce_curative_security)
     LibPowsybl.curative_min_obj_improvement(c, p.curative_min_obj_improvement)
     LibPowsybl.solver(c, LibPowsybl.RaoSolver(p.solver))

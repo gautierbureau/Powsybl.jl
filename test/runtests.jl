@@ -711,7 +711,6 @@ end
   # Default parameters expose editable, typed fields
   defaults = RAO.rao_parameters()
   @test defaults.objective_function_type == RAO.SECURE_FLOW
-  @test defaults.unit == RAO.MEGAWATT
   @test defaults.solver == RAO.CBC
   @test defaults.load_flow_provider == "OpenLoadFlow"
 
