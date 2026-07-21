@@ -161,8 +161,16 @@ module RAO
       search_tree)
   end
 
+  # A minimal RAO parameters JSON carrying an (empty) OpenRAO search-tree extension. Loading
+  # it yields a C struct whose search-tree section — including the nested sensitivity
+  # parameters — is fully initialised with OpenRAO defaults, which a bare createRaoParameters()
+  # is not. We seed the write path from it whenever the parameters carry the extension, so
+  # serializing / running with edited parameters does not read uninitialised memory.
+  const _DEFAULT_SEARCH_TREE_JSON = "{\"version\":\"3.4\",\"extensions\":{\"open-rao-search-tree-parameters\":{}}}"
+
   function _rao_parameters_to_c_struct(p::RaoParameters)
-    c = LibPowsybl.RaoParameters()
+    c = p.search_tree_parameters === nothing ? LibPowsybl.RaoParameters() :
+        LibPowsybl.rao_parameters_from_json(_DEFAULT_SEARCH_TREE_JSON)
     LibPowsybl.objective_function_type(c, LibPowsybl.RaoObjectiveFunctionType(p.objective_function_type))
     LibPowsybl.enforce_curative_security(c, p.enforce_curative_security)
     LibPowsybl.pst_ra_min_impact_threshold(c, p.pst_ra_min_impact_threshold)

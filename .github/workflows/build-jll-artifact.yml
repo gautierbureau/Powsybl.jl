@@ -112,6 +112,9 @@ jobs:
           cp pypowsybl-src/cpp/pypowsybl-java/powsybl-api.h "$inc"/
           cp build-out/java/pypowsybl-java.h build-out/java/graal_isolate.h "$inc"/
           cp build-out/java/graal_isolate_dynamic.h build-out/java/pypowsybl-java_dynamic.h "$inc"/ || true
+          # The wrapper links -lpypowsybl-java from POWSYBL_INSTALL_DIR/lib, so the java lib
+          # must be in place before the wrapper build (not only in the assemble step).
+          cp build-out/java/libpypowsybl-java.so "$PREFIX/lib/"
 
       - name: Build the Julia wrapper (powsybljl-cpp)
         run: |

@@ -741,8 +741,20 @@ end
   @test st.load_flow_provider == "OpenLoadFlow"
   @test st.predefined_combinations == Vector{String}[]
 
-  # Run the RAO from the parameters file
-  result = RAO.run(rao, network, crac; parameters_file = "data/rao/rao_parameters.json")
+  # Edited search-tree parameters round-trip through JSON
+  st.max_mip_iterations = 5
+  st.pst_model = RAO.APPROXIMATED_INTEGERS
+  st.predefined_combinations = [["ra1", "ra2"], ["ra3"]]
+  json = RAO.parameters_to_json(parameters)
+  @test occursin("MAX_MIN_MARGIN", json)
+  restored = RAO.parameters_from_json(json)
+  @test restored.objective_function_type == RAO.MAX_MIN_MARGIN
+  @test restored.search_tree_parameters.max_mip_iterations == 5
+  @test restored.search_tree_parameters.pst_model == RAO.APPROXIMATED_INTEGERS
+  @test restored.search_tree_parameters.predefined_combinations == [["ra1", "ra2"], ["ra3"]]
+
+  # Run the RAO from a rebuilt (edited) parameters object
+  result = RAO.run(rao, network, crac; parameters = parameters)
 
   # The optimisation succeeds
   @test RAO.get_status(result) == RAO.DEFAULT
