@@ -245,7 +245,10 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
   mod.set_const("RATIO_TAP_CHANGER", element_type::RATIO_TAP_CHANGER);
   mod.set_const("PHASE_TAP_CHANGER", element_type::PHASE_TAP_CHANGER);
   mod.set_const("REACTIVE_CAPABILITY_CURVE_POINT", element_type::REACTIVE_CAPABILITY_CURVE_POINT);
-  mod.set_const("OPERATIONAL_LIMITS", element_type::OPERATIONAL_LIMITS);
+  // pypowsybl 1.16.0 replaced the OPERATIONAL_LIMITS element type with LOADING_LIMITS /
+  // SELECTED_LOADING_LIMITS (get_operational_limits is deprecated for get_loading_limits).
+  mod.set_const("SELECTED_LOADING_LIMITS", element_type::SELECTED_LOADING_LIMITS);
+  mod.set_const("LOADING_LIMITS", element_type::LOADING_LIMITS);
   mod.set_const("MINMAX_REACTIVE_LIMITS", element_type::MINMAX_REACTIVE_LIMITS);
   mod.set_const("ALIAS", element_type::ALIAS);
   mod.set_const("IDENTIFIABLE", element_type::IDENTIFIABLE);
@@ -980,8 +983,9 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
   // Reporting (ReportNode)
   // ===========================================================================
 
-  mod.method("create_report_node", [] (std::string const& taskKey, std::string const& defaultName) {
-            return pypowsybl::createReportNode(taskKey, defaultName);
+  mod.method("create_report_node", [] (std::string const& taskKey) {
+            // pypowsybl 1.16.0 dropped the separate defaultName argument from createReportNode.
+            return pypowsybl::createReportNode(taskKey);
     }, "Create a report node collecting functional logs");
 
   mod.method("print_report", [] (pypowsybl::JavaHandle reportNode) {
@@ -1278,9 +1282,16 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
 
   // The CRAC / GLSK / parameters are imported from their file content (JSON or XML text),
   // passed through the same buffered graal entry points pypowsybl feeds from Python buffers.
-  mod.method("load_crac_source", [] (pypowsybl::JavaHandle network, std::string const& cracSource) {
+  mod.method("load_crac_source", [] (pypowsybl::JavaHandle network, std::string const& cracSource, std::string const& fileName) {
+            // pypowsybl 1.16.0 replaced loadCracBufferedSource with a variant that also takes
+            // the file name (for format detection) and a JSON CRAC-creation-parameters buffer
+            // ("{}" selects the defaults).
+            std::string creationParameters = "{}";
             return pypowsybl::PowsyblCaller::get()->callJava<pypowsybl::JavaHandle>(
-                ::loadCracBufferedSource, network, (char*) cracSource.data(), (int) cracSource.size());
+                ::loadCracBufferedSourceWithParameters, network,
+                (char*) cracSource.data(), (int) cracSource.size(),
+                (char*) fileName.c_str(),
+                (char*) creationParameters.data(), (int) creationParameters.size());
     }, "Import a CRAC from its file content against a network");
 
   mod.method("load_glsk_source", [] (std::string const& glskSource) {

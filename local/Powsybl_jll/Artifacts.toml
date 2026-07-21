@@ -1,7 +1,7 @@
 [[Powsybl]]
 arch = "x86_64"
 cxxstring_abi = "cxx11"
-git-tree-sha1 = "8053187fb7d977fce8e888b53192681badddfb8f"
+git-tree-sha1 = "94a59bc02e6bf3f1a900b957f3e7d0ca24dbecc1"
 julia_version = "1.12.3"
 lazy = true
 libc = "glibc"
@@ -13,5 +13,5 @@ os = "linux"
     # supplies the binaries directly and this download is not used
     # (see LOCAL_INSTALL.md).
     [[Powsybl.download]]
-    sha256 = "5f35deeddb442033a0b6609f745bea20e5c3dcb7c7a28c33d2d4bb104d98b983"
+    sha256 = "b901db6e47200cb6549df6b3f6b47d7322204f287c5a9fc67038cb606afec8a0"
     url = "https://github.com/gautierbureau/Powsybl.jl/releases/download/Powsybl-v0.4.0/Powsybl.v0.4.0.x86_64-linux-gnu-cxx11.tar.gz"
