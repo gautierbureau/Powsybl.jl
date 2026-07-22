@@ -124,7 +124,8 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
   mod.set_const("RATIO_TAP_CHANGER", element_type::RATIO_TAP_CHANGER);
   mod.set_const("PHASE_TAP_CHANGER", element_type::PHASE_TAP_CHANGER);
   mod.set_const("REACTIVE_CAPABILITY_CURVE_POINT", element_type::REACTIVE_CAPABILITY_CURVE_POINT);
-  mod.set_const("OPERATIONAL_LIMITS", element_type::OPERATIONAL_LIMITS);
+  mod.set_const("SELECTED_LOADING_LIMITS", element_type::SELECTED_LOADING_LIMITS);
+  mod.set_const("LOADING_LIMITS", element_type::LOADING_LIMITS);
   mod.set_const("MINMAX_REACTIVE_LIMITS", element_type::MINMAX_REACTIVE_LIMITS);
   mod.set_const("ALIAS", element_type::ALIAS);
   mod.set_const("IDENTIFIABLE", element_type::IDENTIFIABLE);
@@ -362,7 +363,7 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
     }, "Open or close a switch, returns true if the state was changed");
 
   mod.method("update_connectable_status", [] (pypowsybl::JavaHandle network, std::string const& id, bool connected) {
-            return pypowsybl::updateConnectableStatus(network, id, connected);
+            return pypowsybl::updateConnectableStatus(network, id, connected, false, false);
     }, "Connect or disconnect a connectable, returns true if the state was changed");
 
   mod.method("get_network_elements_ids", [] (pypowsybl::JavaHandle network, element_type type,
