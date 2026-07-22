@@ -67,7 +67,7 @@ module RAO
   Import a CRAC from a JSON file, interpreted against `network`.
   """
   function load_crac(network::Network.NetworkHandle, crac_file::AbstractString)
-    return Crac(LibPowsybl.load_crac_source(network.handle, String(read(crac_file))))
+    return Crac(LibPowsybl.load_crac_source(network.handle, String(read(crac_file)), String(basename(crac_file))))
   end
 
   """
