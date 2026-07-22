@@ -9,12 +9,12 @@ using BinaryBuilder, Pkg
 name = "Powsybl"
 version = v"0.4.0"
 
-pypowsybl_version = v"1.15.0"
+pypowsybl_version = v"1.16.0"
 
 sources = [
     DirectorySource("./cpp", target="cpp"),
-    # pypowsybl v1.15.0 (git tag v1.15.0). Adds, among other things, CRAC introspection.
-    GitSource("https://github.com/powsybl/pypowsybl.git", "5d246382efcc24edf568ffd4577c53fe4508bee3", "cpp"),
+    # pypowsybl v1.16.0 (git tag v1.16.0).
+    GitSource("https://github.com/powsybl/pypowsybl.git", "5d5c09b842b5ed3c045219e495704acce8871892", "cpp"),
     # NOTE: sha256 checksums below are for the official v1.15.0 release archives.
     # Fill them in from the published archives (BinaryBuilder prints the real hash on a
     # checksum mismatch during the first build if these placeholders are left in place).
