@@ -1,0 +1,168 @@
+# Build the Powsybl_jll binary artifact (the "wheel") from source.
+#
+# Unlike build_local.jl (which downloads pre-built pypowsybl binaries via
+# BinaryBuilder), this workflow builds the whole native stack from the pypowsybl
+# source with GraalVM native-image, so it does not depend on the published
+# release archives. It produces the same set of libraries a Powsybl_jll artifact
+# ships and uploads them as a tarball you can install locally with an
+# Overrides.toml (see LOCAL_INSTALL.md).
+name: Build JLL artifact
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "claude/concat-prs-21-27-**"
+    paths:
+      - "cpp/**"
+      - "build_local.jl"
+      - ".github/workflows/build-jll-artifact.yml"
+  release:
+    types: [published]
+
+jobs:
+  build:
+    name: Build Powsybl_jll (x86_64-linux-gnu-cxx11)
+    runs-on: ubuntu-latest
+    env:
+      JULIA_VERSION: "1.12.3"
+      PREFIX: ${{ github.workspace }}/build-out/prefix
+    steps:
+      - name: Checkout Powsybl.jl
+        uses: actions/checkout@v4
+
+      # pypowsybl version + pinned commit are the single source of truth in
+      # build_local.jl; parse them so the workflow can never drift from it.
+      - name: Read pypowsybl version and commit from build_local.jl
+        id: pyp
+        run: |
+          version=$(grep -oP 'pypowsybl_version = v"\K[^"]+' build_local.jl)
+          commit=$(grep -oP 'pypowsybl\.git", "\K[0-9a-f]{40}' build_local.jl)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit"   >> "$GITHUB_OUTPUT"
+          echo "pypowsybl v$version @ $commit"
+
+      # pypowsybl 1.15.0 targets Java 21; GraalVM provides native-image.
+      - name: Set up GraalVM for JDK 21
+        uses: graalvm/setup-graalvm@v1
+        with:
+          java-version: "21"
+          distribution: "graalvm"
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Julia
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ env.JULIA_VERSION }}
+
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y cmake g++ maven unzip
+
+      - name: Checkout pypowsybl source
+        uses: actions/checkout@v4
+        with:
+          repository: powsybl/pypowsybl
+          ref: ${{ steps.pyp.outputs.commit }}
+          submodules: recursive
+          path: pypowsybl-src
+
+      - name: Build pypowsybl-java (Maven fat jar)
+        working-directory: pypowsybl-src/java/pypowsybl
+        run: mvn --batch-mode clean package -DskipTests
+
+      - name: Build libpypowsybl-java (GraalVM native-image)
+        run: |
+          mkdir -p build-out/java && cd build-out/java
+          "$JAVA_HOME/bin/native-image" \
+            --class-path "$GITHUB_WORKSPACE/pypowsybl-src/java/pypowsybl/target/pypowsybl-java.jar" \
+            -march=compatibility --no-fallback --shared --gc=G1 \
+            -o pypowsybl-java \
+            -H:CLibraryPath="$GITHUB_WORKSPACE/pypowsybl-src/cpp/pypowsybl-java" \
+            --add-exports=org.graalvm.nativeimage.builder/com.oracle.svm.core.c=ALL-UNNAMED
+          # GraalVM omits the lib prefix on Linux; the jll expects libpypowsybl-java.so
+          cp pypowsybl-java.so libpypowsybl-java.so
+
+      - name: Extract math / OR-Tools runtime native libraries
+        run: |
+          dep=pypowsybl-src/java/pypowsybl/target/dependency
+          mkdir -p build-out/java
+          unzip -o -j "$dep/powsybl-math-native.jar" "natives/linux_64/libmath.so" -d build-out/java
+          unzip -o -j "$dep/ortools-Linux-x86-64.jar" \
+            "ortools-linux-x86-64/libjniortools.so" \
+            "ortools-linux-x86-64/libortools.so.9" -d build-out/java
+
+      - name: Build powsybl-cpp
+        run: |
+          mkdir -p cpp-build && cd cpp-build
+          cmake "$GITHUB_WORKSPACE/pypowsybl-src/cpp" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_PYPOWSYBL_JAVA=OFF \
+            -DBUILD_PYTHON_BINDINGS=OFF \
+            -DBUILD_POWSYBL_CPP=ON \
+            -DPYPOWSYBL_JAVA_LIBRARY_DIR="$GITHUB_WORKSPACE/build-out/java" \
+            -DPYPOWSYBL_JAVA_INCLUDE_DIR="$GITHUB_WORKSPACE/build-out/java" \
+            -DCMAKE_INSTALL_PREFIX="$PREFIX"
+          cmake --build . --target install -j"$(nproc)"
+
+      - name: Stage powsybl-cpp headers for the wrapper build
+        run: |
+          inc="$PREFIX/include/powsybl-cpp"
+          mkdir -p "$inc"
+          cp pypowsybl-src/cpp/powsybl-cpp/powsybl-cpp.h "$inc"/
+          cp pypowsybl-src/cpp/pypowsybl-java/powsybl-api.h "$inc"/
+          cp build-out/java/pypowsybl-java.h build-out/java/graal_isolate.h "$inc"/
+          cp build-out/java/graal_isolate_dynamic.h build-out/java/pypowsybl-java_dynamic.h "$inc"/ || true
+          # The wrapper links -lpypowsybl-java from POWSYBL_INSTALL_DIR/lib, so the java lib
+          # must be in place before the wrapper build (not only in the assemble step).
+          cp build-out/java/libpypowsybl-java.so "$PREFIX/lib/"
+
+      - name: Build the Julia wrapper (powsybljl-cpp)
+        run: |
+          # CxxWrap provides the JlCxx CMake package; pin it to the branch's compat.
+          julia --project=wrapenv -e 'using Pkg; Pkg.add(name="CxxWrap", version="0.17.3")'
+          jlcxx=$(julia --project=wrapenv -e 'using CxxWrap; print(CxxWrap.prefix_path())')/lib/cmake/JlCxx
+          julia_prefix=$(julia -e 'print(dirname(Sys.BINDIR))')
+          mkdir -p wrap-build && cd wrap-build
+          cmake "$GITHUB_WORKSPACE/cpp/powsybljl-cpp" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DJlCxx_DIR="$jlcxx" \
+            -DJulia_PREFIX="$julia_prefix" \
+            -DJulia_INCLUDE_DIRS="$julia_prefix/include/julia" \
+            -DPOWSYBL_INSTALL_DIR="$PREFIX" \
+            -DCMAKE_INSTALL_PREFIX="$PREFIX"
+          cmake --build . --target install -j"$(nproc)"
+
+      - name: Assemble the JLL library payload
+        run: |
+          cp build-out/java/libpypowsybl-java.so "$PREFIX/lib/"
+          cp build-out/java/libmath.so build-out/java/libjniortools.so build-out/java/libortools.so.9 "$PREFIX/lib/"
+          echo "== payload =="; ls -la "$PREFIX/lib"
+          # Fail early if a library is unexpectedly missing.
+          for l in libmath libjniortools libpypowsybl-java libpowsybl-cpp libPowsyblJlWrap; do
+            test -e "$PREFIX/lib/$l.so" || { echo "missing $l.so"; exit 1; }
+          done
+
+      - name: Package the artifact tarball
+        id: pack
+        run: |
+          name="Powsybl.v0.4.0.x86_64-linux-gnu-cxx11.tar.gz"
+          tar czf "$name" -C "$PREFIX" lib include
+          sha256=$(sha256sum "$name" | cut -d' ' -f1)
+          echo "name=$name"     >> "$GITHUB_OUTPUT"
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+          echo "SHA256: $sha256"
+
+      - name: Upload the artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Powsybl_jll-x86_64-linux-gnu-cxx11
+          path: ${{ steps.pack.outputs.name }}
+          if-no-files-found: error
+
+      # On a GitHub release, attach the tarball so it can be referenced by an
+      # Artifacts.toml download URL (the standard jll distribution mechanism).
+      - name: Attach tarball to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.pack.outputs.name }}
