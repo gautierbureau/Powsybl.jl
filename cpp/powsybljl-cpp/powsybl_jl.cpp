@@ -329,9 +329,16 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
 
   // The CRAC / GLSK / parameters are imported from their file content (JSON or XML text),
   // passed through the same buffered graal entry points pypowsybl feeds from Python buffers.
-  mod.method("load_crac_source", [] (pypowsybl::JavaHandle network, std::string const& cracSource) {
+  mod.method("load_crac_source", [] (pypowsybl::JavaHandle network, std::string const& cracSource, std::string const& fileName) {
+            // pypowsybl 1.16.0 replaced loadCracBufferedSource with a variant that also takes
+            // the file name (for format detection) and a JSON CRAC-creation-parameters buffer
+            // ("{}" selects the defaults).
+            std::string creationParameters = "{}";
             return pypowsybl::PowsyblCaller::get()->callJava<pypowsybl::JavaHandle>(
-                ::loadCracBufferedSource, network, (char*) cracSource.data(), (int) cracSource.size());
+                ::loadCracBufferedSourceWithParameters, network,
+                (char*) cracSource.data(), (int) cracSource.size(),
+                (char*) fileName.c_str(),
+                (char*) creationParameters.data(), (int) creationParameters.size());
     }, "Import a CRAC from its file content against a network");
 
   mod.method("load_glsk_source", [] (std::string const& glskSource) {
