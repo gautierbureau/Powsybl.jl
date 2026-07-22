@@ -1,0 +1,17 @@
+[[Powsybl]]
+arch = "x86_64"
+cxxstring_abi = "cxx11"
+git-tree-sha1 = "94a59bc02e6bf3f1a900b957f3e7d0ca24dbecc1"
+julia_version = "1.12.3"
+lazy = true
+libc = "glibc"
+os = "linux"
+
+    # Placeholder release URL. The from-source build (build-jll-artifact.yml)
+    # produces this tarball; attach it to a GitHub release and update the URL.
+    # For a local/dev install, an ~/.julia/artifacts/Overrides.toml entry
+    # supplies the binaries directly and this download is not used
+    # (see LOCAL_INSTALL.md).
+    [[Powsybl.download]]
+    sha256 = "b901db6e47200cb6549df6b3f6b47d7322204f287c5a9fc67038cb606afec8a0"
+    url = "https://github.com/gautierbureau/Powsybl.jl/releases/download/Powsybl-v0.4.0/Powsybl.v0.4.0.x86_64-linux-gnu-cxx11.tar.gz"
