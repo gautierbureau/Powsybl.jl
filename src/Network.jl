@@ -181,7 +181,7 @@ module Network
   end
 
   function get_operational_limits(network::NetworkHandle, all_attributes::Bool = false, attributes::Vector{String} = Vector{String}())
-    return get_elements(network, LibPowsybl.OPERATIONAL_LIMITS, all_attributes, attributes)
+    return get_elements(network, LibPowsybl.SELECTED_LOADING_LIMITS, all_attributes, attributes)
   end
 
   function get_extensions(network::NetworkHandle, extension_name::String, table_name::String = "")
