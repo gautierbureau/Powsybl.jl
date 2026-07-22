@@ -372,7 +372,10 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
                                           std::string const& provider, bool dc) {
             std::shared_ptr<pypowsybl::SecurityAnalysisParameters> parameters(pypowsybl::createSecurityAnalysisParameters());
             parameters->loadflow_parameters = loadflowParameters;
-            return pypowsybl::runSecurityAnalysis(analysisContext, network, *parameters, provider, dc, nullptr);
+            // Since pypowsybl 1.15.0 the DC flag is carried on the load flow parameters
+            // (runSecurityAnalysis no longer takes a separate dc argument).
+            parameters->loadflow_parameters.dc = dc;
+            return pypowsybl::runSecurityAnalysis(analysisContext, network, *parameters, provider, nullptr);
     }, "Run a security analysis");
 
   mod.method("run_security_analysis_report", [] (pypowsybl::JavaHandle analysisContext, pypowsybl::JavaHandle network,
@@ -380,7 +383,8 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
                                                  std::string const& provider, bool dc, pypowsybl::JavaHandle reportNode) {
             std::shared_ptr<pypowsybl::SecurityAnalysisParameters> parameters(pypowsybl::createSecurityAnalysisParameters());
             parameters->loadflow_parameters = loadflowParameters;
-            return pypowsybl::runSecurityAnalysis(analysisContext, network, *parameters, provider, dc, &reportNode);
+            parameters->loadflow_parameters.dc = dc;
+            return pypowsybl::runSecurityAnalysis(analysisContext, network, *parameters, provider, &reportNode);
     }, "Run a security analysis, collecting logs into a report node");
 
   mod.method("get_pre_contingency_result", [] (pypowsybl::JavaHandle result) {
