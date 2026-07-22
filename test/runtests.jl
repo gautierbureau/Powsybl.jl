@@ -96,33 +96,31 @@ end
   # This CRAC enables loop-flow computation, which needs a GLSK
   RAO.set_loopflow_glsk(rao, glsk)
 
-  # Default parameters expose editable, typed fields
+  # Default parameters carry no OpenRAO search-tree extension (as in pypowsybl)
   defaults = RAO.rao_parameters()
   @test defaults.objective_function_type == RAO.SECURE_FLOW
-  @test defaults.unit == RAO.MEGAWATT
-  @test defaults.solver == RAO.CBC
-  @test defaults.load_flow_provider == "OpenLoadFlow"
+  @test defaults.search_tree_parameters === nothing
 
-  # Predefined topological RA combinations default to empty and round-trip as nested lists
-  @test RAO.rao_parameters().predefined_combinations == Vector{String}[]
-
-  # Parameters round-trip through JSON, preserving edited fields
-  edited = RAO.rao_parameters()
-  edited.objective_function_type = RAO.MAX_MIN_MARGIN
-  edited.max_mip_iterations = 5
-  edited.pst_model = RAO.APPROXIMATED_INTEGERS
-  edited.predefined_combinations = [["ra1", "ra2"], ["ra3"]]
-  json = RAO.parameters_to_json(edited)
-  @test occursin("MAX_MIN_MARGIN", json)
-  restored = RAO.parameters_from_json(json)
-  @test restored.objective_function_type == RAO.MAX_MIN_MARGIN
-  @test restored.max_mip_iterations == 5
-  @test restored.pst_model == RAO.APPROXIMATED_INTEGERS
-  @test restored.predefined_combinations == [["ra1", "ra2"], ["ra3"]]
-
-  # Load parameters into an editable struct and run the RAO with it
+  # Parameters loaded from a JSON that carries the extension expose the search-tree fields
   parameters = RAO.load_parameters("data/rao/rao_parameters.json")
   @test parameters.objective_function_type == RAO.MAX_MIN_MARGIN
+  st = parameters.search_tree_parameters
+  @test st !== nothing
+  @test st.solver == RAO.CBC
+  @test st.pst_model == RAO.APPROXIMATED_INTEGERS
+  @test st.load_flow_provider == "OpenLoadFlow"
+  @test st.predefined_combinations == Vector{String}[]
+
+  # Edited search-tree parameters round-trip through JSON
+  st.max_mip_iterations = 5
+  st.predefined_combinations = [["ra1", "ra2"], ["ra3"]]
+  json = RAO.parameters_to_json(parameters)
+  @test occursin("MAX_MIN_MARGIN", json)
+  restored = RAO.parameters_from_json(json)
+  @test restored.search_tree_parameters.max_mip_iterations == 5
+  @test restored.search_tree_parameters.predefined_combinations == [["ra1", "ra2"], ["ra3"]]
+
+  # Run the RAO with the loaded parameters
   result = RAO.run(rao, network, crac; parameters = parameters)
 
   # The optimisation succeeds
