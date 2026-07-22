@@ -317,8 +317,9 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
   // Reporting (ReportNode)
   // ===========================================================================
 
-  mod.method("create_report_node", [] (std::string const& taskKey, std::string const& defaultName) {
-            return pypowsybl::createReportNode(taskKey, defaultName);
+  mod.method("create_report_node", [] (std::string const& taskKey) {
+            // pypowsybl 1.16.0 dropped the defaultName argument of createReportNode.
+            return pypowsybl::createReportNode(taskKey);
     }, "Create a report node collecting functional logs");
 
   mod.method("print_report", [] (pypowsybl::JavaHandle reportNode) {
@@ -338,7 +339,11 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
 
   mod.method("run_load_flow_report", [] (const pypowsybl::JavaHandle& network, const pypowsybl::LoadFlowParameters& parameters,
                                          bool dc, const std::string& provider, pypowsybl::JavaHandle reportNode) {
-            pypowsybl::LoadFlowComponentResultArray* results = pypowsybl::runLoadFlow(network, dc, parameters, provider, &reportNode);
+            // Since pypowsybl 1.15.0 the DC flag is carried on the parameters (runLoadFlow no
+            // longer takes a separate dc argument); copy locally to set it.
+            pypowsybl::LoadFlowParameters dcParameters = parameters;
+            dcParameters.dc = dc;
+            pypowsybl::LoadFlowComponentResultArray* results = pypowsybl::runLoadFlow(network, dcParameters, provider, &reportNode);
             return powsybl_array_to_julia(results);
     }, "Run a load flow, collecting logs into a report node");
 }

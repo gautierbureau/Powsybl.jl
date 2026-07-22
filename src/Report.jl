@@ -24,7 +24,9 @@ module Report
   `default_name` its human-readable name.
   """
   function create_report_node(task_key::String = "powsybl", default_name::String = "Powsybl report")
-    return ReportNode(LibPowsybl.create_report_node(task_key, default_name))
+    # pypowsybl 1.16.0 dropped createReportNode's default name; keep the argument for API
+    # stability but no longer forward it.
+    return ReportNode(LibPowsybl.create_report_node(task_key))
   end
 
   """
