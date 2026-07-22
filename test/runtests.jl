@@ -108,7 +108,8 @@ end
   @test restored.dc_power_factor == 0.95
   @test restored.voltage_init_mode == LF.DC_VALUES
   @test restored.balance_type == LF.PROPORTIONAL_TO_LOAD
-  @test restored.countries_to_balance == ["FR", "BE"]
+  # pypowsybl 1.16.0 carries countriesToBalance as an unordered set, so compare without order.
+  @test Set(restored.countries_to_balance) == Set(["FR", "BE"])
 
   # A default set of parameters is serializable and re-parses to the same defaults
   defaults = LF.load_flow_parameters()
