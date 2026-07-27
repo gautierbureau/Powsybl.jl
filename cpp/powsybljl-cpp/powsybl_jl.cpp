@@ -109,9 +109,10 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
   mod.set_const("SHUNT_COMPENSATOR", element_type::SHUNT_COMPENSATOR);
   mod.set_const("NON_LINEAR_SHUNT_COMPENSATOR_SECTION", element_type::NON_LINEAR_SHUNT_COMPENSATOR_SECTION);
   mod.set_const("LINEAR_SHUNT_COMPENSATOR_SECTION", element_type::LINEAR_SHUNT_COMPENSATOR_SECTION);
-  // pypowsybl 1.15.0 renamed the DANGLING_LINE element type to BOUNDARY_LINE; keep the
-  // Julia-facing name stable so Network.get_dangling_lines is unchanged.
-  mod.set_const("DANGLING_LINE", element_type::BOUNDARY_LINE);
+  // pypowsybl 1.15.0 renamed the DANGLING_LINE element type to BOUNDARY_LINE; follow the
+  // same convention on the Julia side. Network.get_boundary_lines is the canonical accessor,
+  // with Network.get_dangling_lines kept as a deprecated alias.
+  mod.set_const("BOUNDARY_LINE", element_type::BOUNDARY_LINE);
   mod.set_const("TIE_LINE", element_type::TIE_LINE);
   mod.set_const("LCC_CONVERTER_STATION", element_type::LCC_CONVERTER_STATION);
   mod.set_const("VSC_CONVERTER_STATION", element_type::VSC_CONVERTER_STATION);
