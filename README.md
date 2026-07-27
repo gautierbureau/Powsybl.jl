@@ -38,7 +38,7 @@ From a loaded network you can have a access to the following network elements (a
 * shunt_compensators
 * non_linear_shunt_compensator_sections
 * linear_shunt_compensator_sections
-* dangling_lines
+* boundary_lines (`dangling_lines` is a deprecated alias)
 * tie_lines
 * lcc_converter_stations
 * vsc_converter_stations
