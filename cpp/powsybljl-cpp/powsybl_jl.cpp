@@ -19,6 +19,7 @@ template <> struct jlcxx::IsMirroredType<series> : std::false_type {};
 template <> struct jlcxx::IsMirroredType<network_metadata> : std::false_type {};
 template <> struct jlcxx::IsMirroredType<loadflow_component_result> : std::false_type {};
 template <> struct jlcxx::IsMirroredType<slack_bus_result> : std::false_type {};
+template <> struct jlcxx::IsMirroredType<matrix> : std::false_type {};
 
 using StringStringMap = std::map<std::string, std::string>;
 
@@ -323,4 +324,70 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
   mod.method("create_loadflow_provider_parameters_series_array", [] (const std::string& provider) {
             return pypowsybl::createLoadFlowProviderParametersSeriesArray(provider);
     }, "Create a parameters series array for a given loadflow provider");
+
+  // ===========================================================================
+  // Sensitivity analysis
+  // ===========================================================================
+
+  // A dense matrix (row-major) returned by the sensitivity result getters.
+  mod.add_type<matrix>("PowsyblMatrix")
+          .method("row_count", [](const matrix& m) { return m.row_count; })
+          .method("column_count", [](const matrix& m) { return m.column_count; })
+          .method("matrix_values", [](matrix& m) {
+             return jlcxx::ArrayRef<double,1>(m.values, m.row_count * m.column_count);
+          });
+
+  mod.method("create_sensitivity_analysis", [] () {
+            return pypowsybl::createSensitivityAnalysis();
+    }, "Create a sensitivity analysis context");
+
+  mod.method("add_sensitivity_contingency", [] (pypowsybl::JavaHandle analysisContext, std::string const& contingencyId,
+                                                std::vector<std::string> const& elementsIds) {
+            pypowsybl::addContingency(analysisContext, contingencyId, elementsIds);
+    }, "Add a contingency to a sensitivity analysis context");
+
+  // Contingency context / function / variable types are passed as ints and cast to the
+  // corresponding C enums, so this binding stays independent of other analysis modules.
+  mod.method("add_factor_matrix", [] (pypowsybl::JavaHandle analysisContext, std::string matrixId,
+                                      std::vector<std::string> const& branchesIds,
+                                      std::vector<std::string> const& variablesIds,
+                                      std::vector<std::string> const& contingenciesIds,
+                                      int contingencyContextType, int sensitivityFunctionType, int sensitivityVariableType) {
+            pypowsybl::addFactorMatrix(analysisContext, matrixId, branchesIds, variablesIds, contingenciesIds,
+                                       static_cast<contingency_context_type>(contingencyContextType),
+                                       static_cast<sensitivity_function_type>(sensitivityFunctionType),
+                                       static_cast<sensitivity_variable_type>(sensitivityVariableType));
+    }, "Add a factor matrix to a sensitivity analysis context");
+
+  mod.method("run_sensitivity_analysis", [] (pypowsybl::JavaHandle analysisContext, pypowsybl::JavaHandle network,
+                                             bool dc, const pypowsybl::LoadFlowParameters& loadflowParameters,
+                                             std::string const& provider) {
+            // pypowsybl 1.15.0 dropped the dc argument of runSensitivityAnalysis; the mode
+            // now travels in the load flow parameters (as it does for runLoadFlow).
+            std::shared_ptr<pypowsybl::SensitivityAnalysisParameters> parameters(pypowsybl::createSensitivityAnalysisParameters());
+            parameters->loadflow_parameters = loadflowParameters;
+            parameters->loadflow_parameters.dc = dc;
+            return pypowsybl::runSensitivityAnalysis(analysisContext, network, *parameters, provider, nullptr);
+    }, "Run a sensitivity analysis");
+
+  mod.method("run_sensitivity_analysis_report", [] (pypowsybl::JavaHandle analysisContext, pypowsybl::JavaHandle network,
+                                                    bool dc, const pypowsybl::LoadFlowParameters& loadflowParameters,
+                                                    std::string const& provider, pypowsybl::JavaHandle reportNode) {
+            std::shared_ptr<pypowsybl::SensitivityAnalysisParameters> parameters(pypowsybl::createSensitivityAnalysisParameters());
+            parameters->loadflow_parameters = loadflowParameters;
+            parameters->loadflow_parameters.dc = dc;
+            return pypowsybl::runSensitivityAnalysis(analysisContext, network, *parameters, provider, &reportNode);
+    }, "Run a sensitivity analysis, collecting logs into a report node");
+
+  mod.method("get_sensitivity_matrix", [] (pypowsybl::JavaHandle result, std::string const& matrixId, std::string const& contingencyId) {
+            return pypowsybl::getSensitivityMatrix(result, matrixId, contingencyId);
+    }, "Get the sensitivity values matrix of a factor matrix for a given contingency");
+
+  mod.method("get_reference_matrix", [] (pypowsybl::JavaHandle result, std::string const& matrixId, std::string const& contingencyId) {
+            return pypowsybl::getReferenceMatrix(result, matrixId, contingencyId);
+    }, "Get the reference (function) values matrix of a factor matrix for a given contingency");
+
+  mod.method("get_sensitivity_analysis_provider_names", [] () {
+            return pypowsybl::getSensitivityAnalysisProviderNames();
+    }, "Get the names of the available sensitivity analysis providers");
 }
