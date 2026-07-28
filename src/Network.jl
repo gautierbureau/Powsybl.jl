@@ -234,5 +234,133 @@ module Network
       LibPowsybl.save_network(network.handle, network_file, format, LibPowsybl.dict_to_string_string_map(parameters))
   end
 
+  # Series type codes returned by the metadata (match the reader in
+  # create_dataframe_from_series_array): 0 = string, 1 = double, 2 = int, 3 = bool.
+  function _infer_series_type(column)
+    element_type = eltype(column)
+    if element_type <: AbstractString
+      return 0
+    elseif element_type <: Bool
+      return 3
+    elseif element_type <: Integer
+      return 2
+    elseif element_type <: Real
+      return 1
+    else
+      return 0
+    end
+  end
+
+  function _fill_builder!(builder, kwargs, meta_names, meta_types, meta_indices)
+    type_by_name = Dict{String, Int}()
+    index_names = Set{String}()
+    for (name, type_code, is_index) in zip(meta_names, meta_types, meta_indices)
+      column_name = String(name)
+      type_by_name[column_name] = Int(type_code)
+      if Int(is_index) != 0
+        push!(index_names, column_name)
+      end
+    end
+
+    # Number of rows = longest provided vector column (scalars are broadcast).
+    row_count = 1
+    for (_, value) in kwargs
+      if value isa AbstractVector
+        row_count = max(row_count, length(value))
+      end
+    end
+
+    for (key, value) in kwargs
+      column_name = String(key)
+      column = value isa AbstractVector ? collect(value) : fill(value, row_count)
+      if length(column) == 1 && row_count > 1
+        column = fill(column[1], row_count)
+      elseif length(column) != row_count
+        throw(ArgumentError("column \"$column_name\" has $(length(column)) values but $row_count were expected"))
+      end
+
+      type_code = get(type_by_name, column_name, _infer_series_type(column))
+      is_index = column_name in index_names
+
+      if type_code == 0
+        LibPowsybl.add_string_series(builder, column_name, is_index, StdVector{StdString}(String.(column)))
+      elseif type_code == 1
+        LibPowsybl.add_double_series(builder, column_name, is_index, StdVector{Float64}(Float64.(column)))
+      elseif type_code == 2
+        LibPowsybl.add_int_series(builder, column_name, is_index, StdVector{Cint}(Cint.(column)))
+      elseif type_code == 3
+        LibPowsybl.add_bool_series(builder, column_name, is_index, StdVector{Cint}(Cint.(Bool.(column))))
+      end
+    end
+    return builder
+  end
+
+  """
+      create_elements(network, element_type; kwargs...)
+
+  Create network elements of the given `element_type` (a `LibPowsybl.ElementType`).
+  Each keyword argument is a column of the creation dataframe; values may be scalars or
+  vectors. This is the generic entry point behind the `create_*` helpers below.
+  """
+  function create_elements(network::NetworkHandle, element_type::LibPowsybl.ElementType; kwargs...)
+    builder = LibPowsybl.ElementDataframe()
+    _fill_builder!(builder, kwargs,
+                   LibPowsybl.get_element_creation_metadata_names(element_type),
+                   LibPowsybl.get_element_creation_metadata_types(element_type),
+                   LibPowsybl.get_element_creation_metadata_indices(element_type))
+    LibPowsybl.create_element(network.handle, builder, element_type)
+    return nothing
+  end
+
+  """
+      update_elements(network, element_type; kwargs...)
+
+  Update existing network elements of the given `element_type`. The `id` column selects
+  the elements; the other keyword columns are the values to set.
+  """
+  function update_elements(network::NetworkHandle, element_type::LibPowsybl.ElementType; kwargs...)
+    builder = LibPowsybl.ElementDataframe()
+    _fill_builder!(builder, kwargs,
+                   LibPowsybl.get_element_metadata_names(element_type),
+                   LibPowsybl.get_element_metadata_types(element_type),
+                   LibPowsybl.get_element_metadata_indices(element_type))
+    LibPowsybl.update_element(network.handle, builder, element_type, per_unit, nominal_apparent_power)
+    return nothing
+  end
+
+  # Convenience creators, one per single-dataframe element type, mirroring pypowsybl.
+  create_substations(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.SUBSTATION; kwargs...)
+  create_voltage_levels(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.VOLTAGE_LEVEL; kwargs...)
+  create_buses(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.BUS; kwargs...)
+  create_busbar_sections(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.BUSBAR_SECTION; kwargs...)
+  create_loads(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.LOAD; kwargs...)
+  create_generators(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.GENERATOR; kwargs...)
+  create_batteries(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.BATTERY; kwargs...)
+  create_dangling_lines(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.DANGLING_LINE; kwargs...)
+  create_lines(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.LINE; kwargs...)
+  create_2_windings_transformers(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.TWO_WINDINGS_TRANSFORMER; kwargs...)
+  create_switches(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.SWITCH; kwargs...)
+  create_static_var_compensators(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.STATIC_VAR_COMPENSATOR; kwargs...)
+  create_lcc_converter_stations(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.LCC_CONVERTER_STATION; kwargs...)
+  create_vsc_converter_stations(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.VSC_CONVERTER_STATION; kwargs...)
+  create_hvdc_lines(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.HVDC_LINE; kwargs...)
+
+  # Convenience updaters.
+  update_substations(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.SUBSTATION; kwargs...)
+  update_voltage_levels(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.VOLTAGE_LEVEL; kwargs...)
+  update_buses(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.BUS; kwargs...)
+  update_loads(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.LOAD; kwargs...)
+  update_generators(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.GENERATOR; kwargs...)
+  update_batteries(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.BATTERY; kwargs...)
+  update_dangling_lines(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.DANGLING_LINE; kwargs...)
+  update_lines(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.LINE; kwargs...)
+  update_2_windings_transformers(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.TWO_WINDINGS_TRANSFORMER; kwargs...)
+  update_switches(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.SWITCH; kwargs...)
+  update_shunt_compensators(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.SHUNT_COMPENSATOR; kwargs...)
+  update_static_var_compensators(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.STATIC_VAR_COMPENSATOR; kwargs...)
+  update_vsc_converter_stations(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.VSC_CONVERTER_STATION; kwargs...)
+  update_lcc_converter_stations(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.LCC_CONVERTER_STATION; kwargs...)
+  update_hvdc_lines(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.HVDC_LINE; kwargs...)
+
   include("NetworkCreationUtils.jl")
 end
