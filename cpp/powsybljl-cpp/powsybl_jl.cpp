@@ -222,6 +222,19 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
   mod.set_const("BRANCH", element_type::BRANCH);
   mod.set_const("TERMINAL", element_type::TERMINAL);
   mod.set_const("SUB_NETWORK", element_type::SUB_NETWORK);
+  mod.set_const("GROUND", element_type::GROUND);
+  // Operational limits come in two flavours: every limit set, or only the selected ones.
+  mod.set_const("SELECTED_OPERATIONAL_LIMITS", element_type::SELECTED_OPERATIONAL_LIMITS);
+  mod.set_const("AREA", element_type::AREA);
+  mod.set_const("AREA_VOLTAGE_LEVELS", element_type::AREA_VOLTAGE_LEVELS);
+  mod.set_const("AREA_BOUNDARIES", element_type::AREA_BOUNDARIES);
+  mod.set_const("INTERNAL_CONNECTION", element_type::INTERNAL_CONNECTION);
+  mod.set_const("PROPERTIES", element_type::PROPERTIES);
+  mod.set_const("DC_LINE", element_type::DC_LINE);
+  mod.set_const("DC_NODE", element_type::DC_NODE);
+  mod.set_const("DC_BUS", element_type::DC_BUS);
+  mod.set_const("DC_GROUND", element_type::DC_GROUND);
+  mod.set_const("VOLTAGE_SOURCE_CONVERTER", element_type::VOLTAGE_SOURCE_CONVERTER);
 
   mod.add_bits<filter_attributes_type>("FilterAttributes", jlcxx::julia_type("CppEnum"));
   mod.set_const("ALL_ATTRIBUTES", filter_attributes_type::ALL_ATTRIBUTES);

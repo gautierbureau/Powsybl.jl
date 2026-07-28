@@ -197,8 +197,52 @@ module Network
     return get_elements(network, LibPowsybl.LOAD, all_attributes, attributes)
   end
 
-  function get_operational_limits(network::NetworkHandle, all_attributes::Bool = false, attributes::Vector{String} = Vector{String}())
-    return get_elements(network, LibPowsybl.OPERATIONAL_LIMITS, all_attributes, attributes)
+  # As in pypowsybl, only the limits of the selected limit sets are returned by default;
+  # show_inactive_sets = true returns every limit set instead.
+  function get_operational_limits(network::NetworkHandle, all_attributes::Bool = false, attributes::Vector{String} = Vector{String}();
+                                  show_inactive_sets::Bool = false)
+    element_type = show_inactive_sets ? LibPowsybl.OPERATIONAL_LIMITS : LibPowsybl.SELECTED_OPERATIONAL_LIMITS
+    return get_elements(network, element_type, all_attributes, attributes)
+  end
+
+  function get_grounds(network::NetworkHandle, all_attributes::Bool = false, attributes::Vector{String} = Vector{String}())
+    return get_elements(network, LibPowsybl.GROUND, all_attributes, attributes)
+  end
+
+  function get_areas(network::NetworkHandle, all_attributes::Bool = false, attributes::Vector{String} = Vector{String}())
+    return get_elements(network, LibPowsybl.AREA, all_attributes, attributes)
+  end
+
+  function get_areas_voltage_levels(network::NetworkHandle, all_attributes::Bool = false, attributes::Vector{String} = Vector{String}())
+    return get_elements(network, LibPowsybl.AREA_VOLTAGE_LEVELS, all_attributes, attributes)
+  end
+
+  function get_areas_boundaries(network::NetworkHandle, all_attributes::Bool = false, attributes::Vector{String} = Vector{String}())
+    return get_elements(network, LibPowsybl.AREA_BOUNDARIES, all_attributes, attributes)
+  end
+
+  function get_elements_properties(network::NetworkHandle, all_attributes::Bool = false, attributes::Vector{String} = Vector{String}())
+    return get_elements(network, LibPowsybl.PROPERTIES, all_attributes, attributes)
+  end
+
+  function get_dc_lines(network::NetworkHandle, all_attributes::Bool = false, attributes::Vector{String} = Vector{String}())
+    return get_elements(network, LibPowsybl.DC_LINE, all_attributes, attributes)
+  end
+
+  function get_dc_nodes(network::NetworkHandle, all_attributes::Bool = false, attributes::Vector{String} = Vector{String}())
+    return get_elements(network, LibPowsybl.DC_NODE, all_attributes, attributes)
+  end
+
+  function get_dc_buses(network::NetworkHandle, all_attributes::Bool = false, attributes::Vector{String} = Vector{String}())
+    return get_elements(network, LibPowsybl.DC_BUS, all_attributes, attributes)
+  end
+
+  function get_dc_grounds(network::NetworkHandle, all_attributes::Bool = false, attributes::Vector{String} = Vector{String}())
+    return get_elements(network, LibPowsybl.DC_GROUND, all_attributes, attributes)
+  end
+
+  function get_voltage_source_converters(network::NetworkHandle, all_attributes::Bool = false, attributes::Vector{String} = Vector{String}())
+    return get_elements(network, LibPowsybl.VOLTAGE_SOURCE_CONVERTER, all_attributes, attributes)
   end
 
   function get_extensions(network::NetworkHandle, extension_name::String, table_name::String = "")
@@ -543,6 +587,15 @@ module Network
     ("operational_limits", :OPERATIONAL_LIMITS),
     ("minmax_reactive_limits", :MINMAX_REACTIVE_LIMITS),
     ("curve_reactive_limits", :REACTIVE_CAPABILITY_CURVE_POINT),
+    ("grounds", :GROUND),
+    ("areas", :AREA),
+    ("areas_voltage_levels", :AREA_VOLTAGE_LEVELS),
+    ("areas_boundaries", :AREA_BOUNDARIES),
+    ("internal_connections", :INTERNAL_CONNECTION),
+    ("dc_lines", :DC_LINE),
+    ("dc_nodes", :DC_NODE),
+    ("dc_grounds", :DC_GROUND),
+    ("voltage_source_converters", :VOLTAGE_SOURCE_CONVERTER),
   ]
 
   const _UPDATERS = [
@@ -575,6 +628,13 @@ module Network
     ("terminals", :TERMINAL),
     ("branches", :BRANCH),
     ("injections", :INJECTION),
+    ("grounds", :GROUND),
+    ("areas", :AREA),
+    ("dc_lines", :DC_LINE),
+    ("dc_nodes", :DC_NODE),
+    ("dc_buses", :DC_BUS),
+    ("dc_grounds", :DC_GROUND),
+    ("voltage_source_converters", :VOLTAGE_SOURCE_CONVERTER),
   ]
 
   for (suffix, element_type) in _CREATORS
@@ -607,6 +667,12 @@ module Network
   function update_dangling_lines(network::NetworkHandle; kwargs...)
     Base.depwarn("update_dangling_lines is deprecated, use update_boundary_lines instead.", :update_dangling_lines)
     return update_boundary_lines(network; kwargs...)
+  end
+
+  function update_dangling_lines_generation(network::NetworkHandle; kwargs...)
+    Base.depwarn("update_dangling_lines_generation is deprecated, use update_boundary_lines_generation instead.",
+                 :update_dangling_lines_generation)
+    return update_boundary_lines_generation(network; kwargs...)
   end
 
   # ---------------------------------------------------------------------------

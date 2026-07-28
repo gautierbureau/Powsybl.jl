@@ -54,7 +54,11 @@ From a loaded network you can have a access to the following network elements (a
 * injections
 * branches
 * terminals
-* operational_limits
+* operational_limits (of the selected limit sets, or of every set with `show_inactive_sets = true`)
+* grounds
+* areas, areas_voltage_levels and areas_boundaries
+* dc_lines, dc_nodes, dc_buses, dc_grounds and voltage_source_converters
+* elements_properties
 
 ```julia
 
@@ -375,9 +379,11 @@ Convenience creators are available for `substations`, `voltage_levels`, `buses`,
 `2_windings_transformers`, `3_windings_transformers`, `switches`,
 `static_var_compensators`, `lcc_converter_stations`, `vsc_converter_stations`,
 `hvdc_lines`, `tie_lines`, `operational_limits`, `minmax_reactive_limits` and
-`curve_reactive_limits` (plus `add_aliases`), with `update_*` helpers covering those and
-the tap changers, their steps, the shunt compensator sections, `terminals`, `branches` and
-`injections`. The generic `create_elements(network, element_type; kwargs...)` and
+`curve_reactive_limits`, `grounds`, `areas`, `areas_voltage_levels`, `areas_boundaries`,
+`internal_connections`, `dc_lines`, `dc_nodes`, `dc_grounds` and
+`voltage_source_converters` (plus `add_aliases`), with `update_*` helpers covering those
+and the tap changers, their steps, the shunt compensator sections, `terminals`, `branches`,
+`injections` and `dc_buses`. The generic `create_elements(network, element_type; kwargs...)` and
 `update_elements(network, element_type; kwargs...)` cover any element type. To discover
 the available columns of a dataframe, inspect an existing element table (e.g.
 `Powsybl.Network.get_loads(network, true)` for all attributes).
