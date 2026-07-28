@@ -441,3 +441,27 @@ column set per dataframe) covers any multi-dataframe element type, and
 
 Column names are checked against the dataframe schema: an unknown column, or a missing
 index column, raises an `ArgumentError` rather than being forwarded to PowSyBl.
+
+### Reporting
+
+Most operations can collect PowSyBl's functional logs into a report node — a tree of
+typed messages describing what happened (iterations, applied corrections, warnings). Pass
+a report node via the `report_node` argument and render it afterwards.
+
+```julia
+julia> using Powsybl
+
+julia> report_node = Powsybl.Report.ReportNode()
+
+# Collect the load flow logs
+julia> network = Powsybl.Network.create_ieee9()
+julia> parameters = Powsybl.LoadFlow.load_flow_parameters()
+julia> Powsybl.LoadFlow.run_ac(network, parameters; report_node = report_node)
+
+# A report node can be reused across operations (e.g. import then solve)
+julia> network2 = Powsybl.Network.load("case.xiidm"; report_node = report_node)
+
+# Render it as text (also shown when the report node is displayed) or as JSON
+julia> print(report_node)
+julia> Powsybl.Report.to_json(report_node)
+```
