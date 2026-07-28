@@ -372,12 +372,26 @@ julia> Powsybl.Network.create_buses(network; id = ["B2", "B3"], voltage_level_id
 
 Convenience creators are available for `substations`, `voltage_levels`, `buses`,
 `busbar_sections`, `loads`, `generators`, `batteries`, `boundary_lines`, `lines`,
-`2_windings_transformers`, `switches`, `static_var_compensators`,
-`lcc_converter_stations`, `vsc_converter_stations` and `hvdc_lines`, plus matching
-`update_*` helpers. The generic `create_elements(network, element_type; kwargs...)` and
+`2_windings_transformers`, `3_windings_transformers`, `switches`,
+`static_var_compensators`, `lcc_converter_stations`, `vsc_converter_stations`,
+`hvdc_lines`, `tie_lines`, `operational_limits`, `minmax_reactive_limits` and
+`curve_reactive_limits` (plus `add_aliases`), with `update_*` helpers covering those and
+the tap changers, their steps, the shunt compensator sections, `terminals`, `branches` and
+`injections`. The generic `create_elements(network, element_type; kwargs...)` and
 `update_elements(network, element_type; kwargs...)` cover any element type. To discover
 the available columns of a dataframe, inspect an existing element table (e.g.
 `Powsybl.Network.get_loads(network, true)` for all attributes).
+
+Every creator and updater also accepts a `DataFrame` instead of keyword arguments, one row
+per element, which makes a read/modify/write round trip straightforward:
+
+```julia
+julia> loads = Powsybl.Network.get_loads(network)
+julia> Powsybl.Network.update_loads(network, DataFrame(id = loads[:, "id"], p0 = loads[:, "p0"] .* 2))
+```
+
+As in pypowsybl, the data is given in one form or the other, never both: passing a
+`DataFrame` together with keyword arguments raises an `ArgumentError`.
 
 Some elements are described by several dataframes: a shunt compensator plus its
 linear or non-linear sections, or a tap changer plus its steps. Dedicated helpers take

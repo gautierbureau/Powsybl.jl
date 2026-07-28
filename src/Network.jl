@@ -359,6 +359,19 @@ module Network
     return builder
   end
 
+  # Columns of one dataframe, whatever form they were given in: a DataFrame, a NamedTuple,
+  # a Dict or the pairs of a keyword list.
+  _column_pairs(columns::DataFrame) = [Symbol(name) => columns[!, name] for name in names(columns)]
+  _column_pairs(columns) = pairs(columns)
+
+  # pypowsybl accepts the data either as a dataframe or as named arguments, never both.
+  function _reject_mixed_input(kwargs)
+    if !isempty(kwargs)
+      throw(ArgumentError("provide the data in only one form: a DataFrame or keyword arguments"))
+    end
+    return nothing
+  end
+
   """
       create_elements(network, element_type; kwargs...)
 
@@ -378,6 +391,28 @@ module Network
   Update existing network elements of the given `element_type`. The `id` column selects
   the elements; the other keyword columns are the values to set.
   """
+  """
+      create_elements(network, element_type, df::DataFrame)
+
+  Create network elements from a `DataFrame`, one row per element and one column per
+  attribute, as pypowsybl's creators accept a dataframe instead of named arguments.
+  """
+  function create_elements(network::NetworkHandle, element_type::LibPowsybl.ElementType, df::DataFrame; kwargs...)
+    _reject_mixed_input(kwargs)
+    return create_elements(network, element_type, Any[df])
+  end
+
+  """
+      update_elements(network, element_type, df::DataFrame)
+
+  Update network elements from a `DataFrame`. The index column (usually `id`) selects the
+  elements, the other columns are the values to set.
+  """
+  function update_elements(network::NetworkHandle, element_type::LibPowsybl.ElementType, df::DataFrame; kwargs...)
+    _reject_mixed_input(kwargs)
+    return update_elements(network, element_type; _column_pairs(df)...)
+  end
+
   function update_elements(network::NetworkHandle, element_type::LibPowsybl.ElementType; kwargs...)
     builder = LibPowsybl.ElementDataframe()
     _fill_builder!(builder, kwargs,
@@ -404,7 +439,7 @@ module Network
     dataframe_count = max(Int(LibPowsybl.get_element_creation_dataframes_count(element_type)), 1)
     for i in 0:(dataframe_count - 1)
       columns = (i + 1) <= length(column_sets) ? column_sets[i + 1] : (;)
-      _fill_builder!(builder, pairs(columns),
+      _fill_builder!(builder, _column_pairs(columns),
                      LibPowsybl.get_element_creation_metadata_names_at(element_type, i),
                      LibPowsybl.get_element_creation_metadata_types_at(element_type, i),
                      LibPowsybl.get_element_creation_metadata_indices_at(element_type, i))
@@ -430,6 +465,13 @@ module Network
                                non_linear === nothing ? (;) : non_linear])
   end
 
+  function create_shunt_compensators(network::NetworkHandle, df::DataFrame; linear = nothing, non_linear = nothing)
+    return create_elements(network, LibPowsybl.SHUNT_COMPENSATOR,
+                           Any[df,
+                               linear === nothing ? (;) : linear,
+                               non_linear === nothing ? (;) : non_linear])
+  end
+
   """
       create_ratio_tap_changers(network; steps, kwargs...)
 
@@ -441,6 +483,10 @@ module Network
     return create_elements(network, LibPowsybl.RATIO_TAP_CHANGER, Any[kwargs, steps])
   end
 
+  function create_ratio_tap_changers(network::NetworkHandle, df::DataFrame; steps)
+    return create_elements(network, LibPowsybl.RATIO_TAP_CHANGER, Any[df, steps])
+  end
+
   """
       create_phase_tap_changers(network; steps, kwargs...)
 
@@ -449,6 +495,10 @@ module Network
   """
   function create_phase_tap_changers(network::NetworkHandle; steps, kwargs...)
     return create_elements(network, LibPowsybl.PHASE_TAP_CHANGER, Any[kwargs, steps])
+  end
+
+  function create_phase_tap_changers(network::NetworkHandle, df::DataFrame; steps)
+    return create_elements(network, LibPowsybl.PHASE_TAP_CHANGER, Any[df, steps])
   end
 
   """
@@ -465,39 +515,87 @@ module Network
                            Any[kwargs, generation === nothing ? (;) : generation])
   end
 
-  # Convenience creators, one per single-dataframe element type, mirroring pypowsybl.
-  create_substations(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.SUBSTATION; kwargs...)
-  create_voltage_levels(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.VOLTAGE_LEVEL; kwargs...)
-  create_buses(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.BUS; kwargs...)
-  create_busbar_sections(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.BUSBAR_SECTION; kwargs...)
-  create_loads(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.LOAD; kwargs...)
-  create_generators(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.GENERATOR; kwargs...)
-  create_batteries(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.BATTERY; kwargs...)
-  create_lines(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.LINE; kwargs...)
-  create_2_windings_transformers(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.TWO_WINDINGS_TRANSFORMER; kwargs...)
-  create_switches(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.SWITCH; kwargs...)
-  create_static_var_compensators(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.STATIC_VAR_COMPENSATOR; kwargs...)
-  create_lcc_converter_stations(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.LCC_CONVERTER_STATION; kwargs...)
-  create_vsc_converter_stations(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.VSC_CONVERTER_STATION; kwargs...)
-  create_hvdc_lines(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.HVDC_LINE; kwargs...)
+  function create_boundary_lines(network::NetworkHandle, df::DataFrame; generation = nothing)
+    return create_elements(network, LibPowsybl.BOUNDARY_LINE,
+                           Any[df, generation === nothing ? (;) : generation])
+  end
 
-  # Convenience updaters.
-  update_substations(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.SUBSTATION; kwargs...)
-  update_voltage_levels(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.VOLTAGE_LEVEL; kwargs...)
-  update_buses(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.BUS; kwargs...)
-  update_loads(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.LOAD; kwargs...)
-  update_generators(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.GENERATOR; kwargs...)
-  update_batteries(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.BATTERY; kwargs...)
-  update_boundary_lines(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.BOUNDARY_LINE; kwargs...)
-  update_boundary_lines_generation(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.BOUNDARY_LINE_GENERATION; kwargs...)
-  update_lines(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.LINE; kwargs...)
-  update_2_windings_transformers(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.TWO_WINDINGS_TRANSFORMER; kwargs...)
-  update_switches(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.SWITCH; kwargs...)
-  update_shunt_compensators(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.SHUNT_COMPENSATOR; kwargs...)
-  update_static_var_compensators(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.STATIC_VAR_COMPENSATOR; kwargs...)
-  update_vsc_converter_stations(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.VSC_CONVERTER_STATION; kwargs...)
-  update_lcc_converter_stations(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.LCC_CONVERTER_STATION; kwargs...)
-  update_hvdc_lines(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.HVDC_LINE; kwargs...)
+  # Convenience creators and updaters, one per single-dataframe element type, named after
+  # their pypowsybl counterparts. Each entry generates both a keyword method and a
+  # DataFrame method, the two input forms pypowsybl offers.
+  const _CREATORS = [
+    ("substations", :SUBSTATION),
+    ("voltage_levels", :VOLTAGE_LEVEL),
+    ("buses", :BUS),
+    ("busbar_sections", :BUSBAR_SECTION),
+    ("loads", :LOAD),
+    ("generators", :GENERATOR),
+    ("batteries", :BATTERY),
+    ("lines", :LINE),
+    ("2_windings_transformers", :TWO_WINDINGS_TRANSFORMER),
+    ("3_windings_transformers", :THREE_WINDINGS_TRANSFORMER),
+    ("switches", :SWITCH),
+    ("static_var_compensators", :STATIC_VAR_COMPENSATOR),
+    ("lcc_converter_stations", :LCC_CONVERTER_STATION),
+    ("vsc_converter_stations", :VSC_CONVERTER_STATION),
+    ("hvdc_lines", :HVDC_LINE),
+    ("tie_lines", :TIE_LINE),
+    ("operational_limits", :OPERATIONAL_LIMITS),
+    ("minmax_reactive_limits", :MINMAX_REACTIVE_LIMITS),
+    ("curve_reactive_limits", :REACTIVE_CAPABILITY_CURVE_POINT),
+  ]
+
+  const _UPDATERS = [
+    ("substations", :SUBSTATION),
+    ("voltage_levels", :VOLTAGE_LEVEL),
+    ("buses", :BUS),
+    ("busbar_sections", :BUSBAR_SECTION),
+    ("loads", :LOAD),
+    ("generators", :GENERATOR),
+    ("batteries", :BATTERY),
+    ("boundary_lines", :BOUNDARY_LINE),
+    ("boundary_lines_generation", :BOUNDARY_LINE_GENERATION),
+    ("lines", :LINE),
+    ("2_windings_transformers", :TWO_WINDINGS_TRANSFORMER),
+    ("3_windings_transformers", :THREE_WINDINGS_TRANSFORMER),
+    ("switches", :SWITCH),
+    ("shunt_compensators", :SHUNT_COMPENSATOR),
+    ("linear_shunt_compensator_sections", :LINEAR_SHUNT_COMPENSATOR_SECTION),
+    ("non_linear_shunt_compensator_sections", :NON_LINEAR_SHUNT_COMPENSATOR_SECTION),
+    ("static_var_compensators", :STATIC_VAR_COMPENSATOR),
+    ("vsc_converter_stations", :VSC_CONVERTER_STATION),
+    ("lcc_converter_stations", :LCC_CONVERTER_STATION),
+    ("hvdc_lines", :HVDC_LINE),
+    ("tie_lines", :TIE_LINE),
+    ("ratio_tap_changers", :RATIO_TAP_CHANGER),
+    ("ratio_tap_changer_steps", :RATIO_TAP_CHANGER_STEP),
+    ("phase_tap_changers", :PHASE_TAP_CHANGER),
+    ("phase_tap_changer_steps", :PHASE_TAP_CHANGER_STEP),
+    ("operational_limits", :OPERATIONAL_LIMITS),
+    ("terminals", :TERMINAL),
+    ("branches", :BRANCH),
+    ("injections", :INJECTION),
+  ]
+
+  for (suffix, element_type) in _CREATORS
+    name = Symbol("create_", suffix)
+    @eval begin
+      $name(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.$element_type; kwargs...)
+      $name(network::NetworkHandle, df::DataFrame; kwargs...) = create_elements(network, LibPowsybl.$element_type, df; kwargs...)
+    end
+  end
+
+  for (suffix, element_type) in _UPDATERS
+    name = Symbol("update_", suffix)
+    @eval begin
+      $name(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.$element_type; kwargs...)
+      $name(network::NetworkHandle, df::DataFrame; kwargs...) = update_elements(network, LibPowsybl.$element_type, df; kwargs...)
+    end
+  end
+
+  # pypowsybl spells the alias creator add_aliases rather than create_aliases.
+  add_aliases(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.ALIAS; kwargs...)
+  add_aliases(network::NetworkHandle, df::DataFrame; kwargs...) = create_elements(network, LibPowsybl.ALIAS, df; kwargs...)
 
   # Deprecated since pypowsybl 1.15.0 renamed the DANGLING_LINE element type to BOUNDARY_LINE.
   # Kept as aliases for backward compatibility; use the boundary line versions instead.
@@ -552,14 +650,15 @@ module Network
   NamedTuple, `Dict`, or the pairs of a keyword list) per dataframe, in the order given by
   the extension's creation schema. Trailing dataframes may be omitted and any dataframe may
   be left empty (`(;)`). This mirrors pypowsybl's `create_extensions`, which accepts either
-  a single dataframe or a list of them.
+  a single dataframe or a list of them. A `DataFrame` may be used for any of the column
+  sets, and a lone `DataFrame` may be passed instead of the vector.
   """
   function create_extensions(network::NetworkHandle, extension_name::String, column_sets::AbstractVector)
     builder = LibPowsybl.ElementDataframe()
     dataframe_count = max(Int(LibPowsybl.get_extension_creation_dataframes_count(extension_name)), 1)
     for i in 0:(dataframe_count - 1)
       columns = (i + 1) <= length(column_sets) ? column_sets[i + 1] : (;)
-      _fill_builder!(builder, pairs(columns),
+      _fill_builder!(builder, _column_pairs(columns),
                      LibPowsybl.get_extension_creation_metadata_names_at(extension_name, i),
                      LibPowsybl.get_extension_creation_metadata_types_at(extension_name, i),
                      LibPowsybl.get_extension_creation_metadata_indices_at(extension_name, i))
@@ -576,6 +675,22 @@ module Network
   tables (e.g. a main table and a secondary one); `table_name` selects which one to
   update (empty for the default table).
   """
+  function create_extensions(network::NetworkHandle, extension_name::String, df::DataFrame; kwargs...)
+    _reject_mixed_input(kwargs)
+    return create_extensions(network, extension_name, Any[df])
+  end
+
+  """
+      update_extensions(network, extension_name, df::DataFrame; table_name = "")
+
+  Update existing extensions from a `DataFrame` instead of named arguments.
+  """
+  function update_extensions(network::NetworkHandle, extension_name::String, df::DataFrame;
+                             table_name::String = "", kwargs...)
+    _reject_mixed_input(kwargs)
+    return update_extensions(network, extension_name; table_name = table_name, _column_pairs(df)...)
+  end
+
   function update_extensions(network::NetworkHandle, extension_name::String; table_name::String = "", kwargs...)
     builder = LibPowsybl.ElementDataframe()
     _fill_builder!(builder, kwargs,

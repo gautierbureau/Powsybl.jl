@@ -6,6 +6,7 @@
 
 using Powsybl
 using Test
+using DataFrames
 
 # To avoid reading potential user specific configuration
 Powsybl.LibPowsybl.set_config_read(false)
@@ -144,6 +145,34 @@ end
   # Mismatched column lengths are still rejected
   @test_throws ArgumentError Powsybl.Network.create_buses(network; id = ["B2", "B3", "B4"],
                                                           voltage_level_id = ["VL1", "VL1"])
+end
+
+@testset "Test DataFrame input for creation and update" begin
+  network = Powsybl.Network.create_empty()
+  Powsybl.Network.create_substations(network; id = "S1", country = "FR")
+  Powsybl.Network.create_voltage_levels(network; id = "VL1", substation_id = "S1",
+                                        topology_kind = "BUS_BREAKER", nominal_v = 400.0)
+  Powsybl.Network.create_buses(network; id = "B1", voltage_level_id = "VL1")
+
+  # Create from a DataFrame instead of keyword arguments
+  loads_df = DataFrame(id = ["LOAD1", "LOAD2"], voltage_level_id = ["VL1", "VL1"],
+                       bus_id = ["B1", "B1"], p0 = [100.0, 200.0], q0 = [10.0, 20.0])
+  Powsybl.Network.create_loads(network, loads_df)
+  loads = Powsybl.Network.get_loads(network)
+  @test "LOAD1" in loads[:, "id"]
+  @test "LOAD2" in loads[:, "id"]
+
+  # Round trip: read a table, change it, write it straight back
+  loads = Powsybl.Network.get_loads(network)
+  update_df = DataFrame(id = loads[:, "id"], p0 = loads[:, "p0"] .* 2)
+  Powsybl.Network.update_loads(network, update_df)
+  loads = Powsybl.Network.get_loads(network)
+  row = findfirst(==("LOAD1"), loads[:, "id"])
+  @test loads[row, "p0"] == 200.0
+
+  # The data comes either as a DataFrame or as keyword arguments, never both
+  @test_throws ArgumentError Powsybl.Network.create_loads(network, loads_df; p0 = 1.0)
+  @test_throws ArgumentError Powsybl.Network.update_loads(network, update_df; p0 = 1.0)
 end
 
 @testset "Test boundary line creation with its generation part" begin
