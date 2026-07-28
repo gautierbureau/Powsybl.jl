@@ -329,15 +329,18 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
             return pypowsybl::jsonReport(reportNode);
     }, "Render a report node as JSON");
 
-  // Report-aware variants: they thread a report node through the underlying call so it
-  // collects the functional logs produced during execution.
-  mod.method("load_report", [] (std::string const& file, StringStringMap& parameters,
-                                std::vector<std::string>& postProcessors, pypowsybl::JavaHandle reportNode) {
-            return pypowsybl::loadNetwork(file, parameters, postProcessors, &reportNode, false);
-    }, "Load a network from a file, collecting logs into a report node");
+  // Report-aware overloads. pypowsybl has no separate report entry point: loadNetwork and
+  // runLoadFlow simply take the report node (null when there is none). Registering these
+  // under the existing binding names keeps that one-to-one mapping, the extra JavaHandle
+  // argument selecting the report-aware method through Julia's multiple dispatch.
+  mod.method("load", [] (std::string const& s, StringStringMap& parameters,
+                         std::vector<std::string>& postProcessors, pypowsybl::JavaHandle reportNode) {
+    pypowsybl::JavaHandle network = pypowsybl::loadNetwork(s, parameters, postProcessors, &reportNode, false);
+    return network;
+  }, "Load a network from a file, collecting logs into a report node");
 
-  mod.method("run_load_flow_report", [] (const pypowsybl::JavaHandle& network, const pypowsybl::LoadFlowParameters& parameters,
-                                         bool dc, const std::string& provider, pypowsybl::JavaHandle reportNode) {
+  mod.method("run_load_flow", [] (const pypowsybl::JavaHandle& network, const pypowsybl::LoadFlowParameters& parameters,
+                                  bool dc, const std::string& provider, pypowsybl::JavaHandle reportNode) {
             pypowsybl::LoadFlowComponentResultArray* results = pypowsybl::runLoadFlow(network, dc, parameters, provider, &reportNode);
             return powsybl_array_to_julia(results);
     }, "Run a load flow, collecting logs into a report node");

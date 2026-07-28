@@ -8,38 +8,32 @@ module Report
   using ..LibPowsybl
 
   """
+      ReportNode(task_key = "", default_name = "") -> ReportNode
+
   A report node collects the functional logs (a tree of typed messages) produced by
   PowSyBl operations such as a network import or a load flow. Pass it to the operations
-  that accept a `report` argument, then render it with [`to_string`](@ref) or
-  [`to_json`](@ref).
+  that accept a `report_node` argument, then render it as text (`print`, `string` or
+  simply displaying it) or as JSON with [`to_json`](@ref).
+
+  `task_key` is a key identifying the root task and `default_name` its human-readable
+  name. This mirrors pypowsybl's `pypowsybl.report.ReportNode`.
   """
   mutable struct ReportNode
     handle::LibPowsybl.JavaHandle
   end
 
-  """
-      create_report_node(task_key = "powsybl", default_name = "Powsybl report") -> ReportNode
-
-  Create an empty report node. `task_key` is a key identifying the root task and
-  `default_name` its human-readable name.
-  """
-  function create_report_node(task_key::String = "powsybl", default_name::String = "Powsybl report")
+  function ReportNode(task_key::String = "", default_name::String = "")
     return ReportNode(LibPowsybl.create_report_node(task_key, default_name))
   end
 
   """
-      to_string(report::ReportNode) -> String
-
-  Render the report as an indented text tree.
-  """
-  to_string(report::ReportNode) = String(LibPowsybl.print_report(report.handle))
-
-  """
-      to_json(report::ReportNode) -> String
+      to_json(report_node::ReportNode) -> String
 
   Render the report as JSON.
   """
-  to_json(report::ReportNode) = String(LibPowsybl.json_report(report.handle))
+  to_json(report_node::ReportNode) = String(LibPowsybl.json_report(report_node.handle))
 
-  Base.show(io::IO, report::ReportNode) = print(io, to_string(report))
+  # Text rendering. pypowsybl exposes this as ReportNode.__repr__; the Julia equivalent is
+  # show, which also makes print(report_node) and string(report_node) work.
+  Base.show(io::IO, report_node::ReportNode) = print(io, String(LibPowsybl.print_report(report_node.handle)))
 end

@@ -216,12 +216,12 @@ module Network
 
   function load(network_file::String, parameters::Dict{String, String} = Dict{String, String}(),
                 postProcessors::Vector{String} = Vector{String}();
-                report::Union{Nothing, Report.ReportNode} = nothing)::NetworkHandle
+                report_node::Union{Nothing, Report.ReportNode} = nothing)::NetworkHandle
       c_parameters = LibPowsybl.dict_to_string_string_map(parameters)
       c_post_processors = StdVector{StdString}(postProcessors)
-      handle = report === nothing ?
+      handle = report_node === nothing ?
         LibPowsybl.load(network_file, c_parameters, c_post_processors) :
-        LibPowsybl.load_report(network_file, c_parameters, c_post_processors, report.handle)
+        LibPowsybl.load(network_file, c_parameters, c_post_processors, report_node.handle)
     return NetworkHandle(handle,
         LibPowsybl.id(handle),
         LibPowsybl.name(handle),
