@@ -349,8 +349,11 @@ julia> Powsybl.Network.get_buses(network)
 
 Elements can be created and updated with an API mirroring pypowsybl: one keyword argument
 per column, each value a scalar (a single element) or a vector (several elements at once).
-Columns are coerced to the type declared by the element's dataframe schema, so numeric
-literals work without an explicit type. The `id` column identifies the elements.
+As in pypowsybl, all the arguments of one call must have the same number of values — a
+scalar is a column of one row and is not stretched to match a longer one — and an argument
+left at `nothing` counts as not given. Columns are coerced to the type declared by the
+element's dataframe schema, so numeric literals work without an explicit type. The `id`
+column identifies the elements.
 
 ```julia
 julia> using Powsybl

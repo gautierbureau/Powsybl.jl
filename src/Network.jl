@@ -332,16 +332,16 @@ module Network
       push!(index_names, ordered_names[1])
     end
 
-    provided = collect(kwargs)
+    supplied = collect(kwargs)
+    # pypowsybl skips the arguments left at None, its way of spelling "not given"; nothing
+    # plays that role here, so such a column is left out rather than sent as a null one.
+    provided = [entry for entry in supplied if entry.second !== nothing]
 
     # An empty dataframe (e.g. the non-linear sections of a linear shunt) must still carry
     # its index column with zero rows, as pypowsybl does; a truly empty dataframe crashes
     # or is rejected by the Java side.
-    if isempty(provided)
-      for name in index_names
-        _add_series!(builder, name, true, get(type_by_name, name, 0), Int[])
-      end
-      return builder
+    if isempty(supplied)
+      return _add_empty_index!(builder, index_names, type_by_name)
     end
 
     provided_names = Set(String(key) for (key, _) in provided)
@@ -367,25 +367,38 @@ module Network
       end
     end
 
-    # Number of rows = longest provided vector column (scalars are broadcast).
-    row_count = 1
-    for (_, value) in provided
-      if value isa AbstractVector
-        row_count = max(row_count, length(value))
+    # Every argument that was left at nothing counts as not supplied, so the columns may all
+    # be gone by now; that dataframe is empty rather than malformed.
+    if isempty(provided)
+      return _add_empty_index!(builder, index_names, type_by_name)
+    end
+
+    # Each argument is one column, a scalar being a column of a single row. pypowsybl
+    # requires every argument to have the same number of values and does not broadcast a
+    # shorter one, so neither do we: the first argument sets the size.
+    row_count = _column_length(first(provided).second)
+    for (key, value) in provided
+      size = _column_length(value)
+      if size != row_count
+        throw(ArgumentError("all arguments must have the same size, got size $size for " *
+                            "series \"$(String(key))\", expected $row_count"))
       end
     end
 
     for (key, value) in provided
       column_name = String(key)
-      column = value isa AbstractVector ? collect(value) : fill(value, row_count)
-      if length(column) == 1 && row_count > 1
-        column = fill(column[1], row_count)
-      elseif length(column) != row_count
-        throw(ArgumentError("column \"$column_name\" has $(length(column)) values but $row_count were expected"))
-      end
-
+      column = value isa AbstractVector ? collect(value) : [value]
       type_code = get(type_by_name, column_name, _infer_series_type(column))
       _add_series!(builder, column_name, column_name in index_names, type_code, column)
+    end
+    return builder
+  end
+
+  _column_length(value) = value isa AbstractVector ? length(value) : 1
+
+  function _add_empty_index!(builder, index_names, type_by_name)
+    for name in index_names
+      _add_series!(builder, name, true, get(type_by_name, name, 0), Int[])
     end
     return builder
   end
@@ -420,8 +433,10 @@ module Network
       create_elements(network, element_type; kwargs...)
 
   Create network elements of the given `element_type` (a `LibPowsybl.ElementType`).
-  Each keyword argument is a column of the creation dataframe; values may be scalars or
-  vectors. This is the generic entry point behind the `create_*` helpers below.
+  Each keyword argument is a column of the creation dataframe; a value may be a scalar (one
+  element) or a vector (several at once), and all the arguments of one call must have the
+  same number of values. An argument left at `nothing` counts as not given. This is the
+  generic entry point behind the `create_*` helpers below.
   """
   function create_elements(network::NetworkHandle, element_type::LibPowsybl.ElementType; kwargs...)
     # Goes through the multi-dataframe path so that a type whose schema declares several

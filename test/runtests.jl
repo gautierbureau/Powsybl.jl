@@ -145,6 +145,21 @@ end
   # Mismatched column lengths are still rejected
   @test_throws ArgumentError Powsybl.Network.create_buses(network; id = ["B2", "B3", "B4"],
                                                           voltage_level_id = ["VL1", "VL1"])
+
+  # As in pypowsybl, a scalar is a column of one row and is not stretched to match a
+  # longer one: every argument of a call must have the same number of values
+  @test_throws ArgumentError Powsybl.Network.create_buses(network; id = ["B2", "B3"],
+                                                          voltage_level_id = "VL1")
+  @test_throws ArgumentError Powsybl.Network.create_buses(network; id = ["B2", "B3"],
+                                                          voltage_level_id = ["VL1"])
+
+  # An argument left at nothing counts as not given, so it neither adds a column nor
+  # takes part in that size check
+  Powsybl.Network.create_buses(network; id = ["B2", "B3"],
+                               voltage_level_id = ["VL1", "VL1"], name = nothing)
+  buses = Powsybl.Network.get_bus_breaker_view_buses(network)
+  @test "B2" in buses[:, "id"]
+  @test "B3" in buses[:, "id"]
 end
 
 @testset "Test DataFrame input for creation and update" begin
