@@ -100,11 +100,21 @@ module Network
     return get_elements(network, LibPowsybl.BOUNDARY_LINE, all_attributes, attributes)
   end
 
+  function get_boundary_lines_generation(network::NetworkHandle, all_attributes::Bool = false, attributes::Vector{String} = Vector{String}())
+    return get_elements(network, LibPowsybl.BOUNDARY_LINE_GENERATION, all_attributes, attributes)
+  end
+
   # Deprecated since pypowsybl 1.15.0 renamed the DANGLING_LINE element type to BOUNDARY_LINE.
-  # Kept as an alias for backward compatibility; use get_boundary_lines instead.
+  # Kept as aliases for backward compatibility; use the boundary line versions instead.
   function get_dangling_lines(network::NetworkHandle, all_attributes::Bool = false, attributes::Vector{String} = Vector{String}())
     Base.depwarn("get_dangling_lines is deprecated, use get_boundary_lines instead.", :get_dangling_lines)
     return get_boundary_lines(network, all_attributes, attributes)
+  end
+
+  function get_dangling_lines_generation(network::NetworkHandle, all_attributes::Bool = false, attributes::Vector{String} = Vector{String}())
+    Base.depwarn("get_dangling_lines_generation is deprecated, use get_boundary_lines_generation instead.",
+                 :get_dangling_lines_generation)
+    return get_boundary_lines_generation(network, all_attributes, attributes)
   end
 
   function get_tie_lines(network::NetworkHandle, all_attributes::Bool = false, attributes::Vector{String} = Vector{String}())
@@ -264,10 +274,17 @@ module Network
       end
     end
 
+    # Columns declared by the schema. When a schema is unavailable we cannot validate the
+    # column names, so the types are inferred instead (see below).
+    declared = !isempty(ordered_names)
+
     # Secondary creation dataframes (e.g. shunt sections, tap-changer steps) do not flag
     # an index column in their metadata, yet the Java side keys their rows on the first
     # column (the id). Mirror pypowsybl, which sends that column as the dataframe index.
-    if isempty(index_names) && !isempty(ordered_names)
+    # Such an index is only implied, so unlike a declared one it is not required: pypowsybl
+    # falls back to a positional index when the column is absent.
+    implied_index = isempty(index_names) && declared
+    if implied_index
       push!(index_names, ordered_names[1])
     end
 
@@ -281,6 +298,29 @@ module Network
         _add_series!(builder, name, true, get(type_by_name, name, 0), Int[])
       end
       return builder
+    end
+
+    provided_names = Set(String(key) for (key, _) in provided)
+
+    # Reject columns the schema does not know, as pypowsybl does ("No column named ..."),
+    # instead of forwarding a misspelled one to the Java side as an unrecognised series.
+    if declared
+      for column_name in provided_names
+        if !haskey(type_by_name, column_name)
+          throw(ArgumentError("no column named \"$column_name\" for this dataframe; " *
+                              "expected one of: " * join(ordered_names, ", ")))
+        end
+      end
+    end
+
+    # The declared index columns identify the rows, so they must be provided, again as
+    # pypowsybl does ("No data provided for index: ...").
+    if !implied_index
+      for column_name in index_names
+        if !(column_name in provided_names)
+          throw(ArgumentError("no data provided for index column \"$column_name\""))
+        end
+      end
     end
 
     # Number of rows = longest provided vector column (scalars are broadcast).
@@ -327,13 +367,9 @@ module Network
   vectors. This is the generic entry point behind the `create_*` helpers below.
   """
   function create_elements(network::NetworkHandle, element_type::LibPowsybl.ElementType; kwargs...)
-    builder = LibPowsybl.ElementDataframe()
-    _fill_builder!(builder, kwargs,
-                   LibPowsybl.get_element_creation_metadata_names(element_type),
-                   LibPowsybl.get_element_creation_metadata_types(element_type),
-                   LibPowsybl.get_element_creation_metadata_indices(element_type))
-    LibPowsybl.create_element(network.handle, builder, element_type)
-    return nothing
+    # Goes through the multi-dataframe path so that a type whose schema declares several
+    # dataframes still gets them all, the trailing ones empty.
+    return create_elements(network, element_type, Any[kwargs])
   end
 
   """
@@ -363,7 +399,9 @@ module Network
   """
   function create_elements(network::NetworkHandle, element_type::LibPowsybl.ElementType, column_sets::AbstractVector)
     builder = LibPowsybl.ElementDataframe()
-    dataframe_count = LibPowsybl.get_element_creation_dataframes_count(element_type)
+    # Fall back to a single dataframe when the schema is unavailable, so the provided
+    # columns are still sent rather than silently dropped.
+    dataframe_count = max(Int(LibPowsybl.get_element_creation_dataframes_count(element_type)), 1)
     for i in 0:(dataframe_count - 1)
       columns = (i + 1) <= length(column_sets) ? column_sets[i + 1] : (;)
       _fill_builder!(builder, pairs(columns),
@@ -413,6 +451,20 @@ module Network
     return create_elements(network, LibPowsybl.PHASE_TAP_CHANGER, Any[kwargs, steps])
   end
 
+  """
+      create_boundary_lines(network; generation = nothing, kwargs...)
+
+  Create boundary lines. The keyword arguments describe the boundary lines themselves;
+  `generation` is an optional column set describing their generation part
+  (`min_p`, `max_p`, `target_p`, `target_q`, `target_v`, `voltage_regulator_on`), whose
+  `id` links back to the boundary line. This mirrors pypowsybl's `create_boundary_lines`
+  and its `generation_df`.
+  """
+  function create_boundary_lines(network::NetworkHandle; generation = nothing, kwargs...)
+    return create_elements(network, LibPowsybl.BOUNDARY_LINE,
+                           Any[kwargs, generation === nothing ? (;) : generation])
+  end
+
   # Convenience creators, one per single-dataframe element type, mirroring pypowsybl.
   create_substations(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.SUBSTATION; kwargs...)
   create_voltage_levels(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.VOLTAGE_LEVEL; kwargs...)
@@ -421,7 +473,6 @@ module Network
   create_loads(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.LOAD; kwargs...)
   create_generators(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.GENERATOR; kwargs...)
   create_batteries(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.BATTERY; kwargs...)
-  create_boundary_lines(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.BOUNDARY_LINE; kwargs...)
   create_lines(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.LINE; kwargs...)
   create_2_windings_transformers(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.TWO_WINDINGS_TRANSFORMER; kwargs...)
   create_switches(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.SWITCH; kwargs...)
@@ -438,6 +489,7 @@ module Network
   update_generators(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.GENERATOR; kwargs...)
   update_batteries(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.BATTERY; kwargs...)
   update_boundary_lines(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.BOUNDARY_LINE; kwargs...)
+  update_boundary_lines_generation(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.BOUNDARY_LINE_GENERATION; kwargs...)
   update_lines(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.LINE; kwargs...)
   update_2_windings_transformers(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.TWO_WINDINGS_TRANSFORMER; kwargs...)
   update_switches(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.SWITCH; kwargs...)
@@ -449,9 +501,9 @@ module Network
 
   # Deprecated since pypowsybl 1.15.0 renamed the DANGLING_LINE element type to BOUNDARY_LINE.
   # Kept as aliases for backward compatibility; use the boundary line versions instead.
-  function create_dangling_lines(network::NetworkHandle; kwargs...)
+  function create_dangling_lines(network::NetworkHandle; generation = nothing, kwargs...)
     Base.depwarn("create_dangling_lines is deprecated, use create_boundary_lines instead.", :create_dangling_lines)
-    return create_boundary_lines(network; kwargs...)
+    return create_boundary_lines(network; generation = generation, kwargs...)
   end
 
   function update_dangling_lines(network::NetworkHandle; kwargs...)
@@ -488,11 +540,31 @@ module Network
   the available extension types.
   """
   function create_extensions(network::NetworkHandle, extension_name::String; kwargs...)
+    # Goes through the multi-dataframe path so that an extension whose schema declares
+    # several dataframes still gets them all, the trailing ones empty.
+    return create_extensions(network, extension_name, Any[kwargs])
+  end
+
+  """
+      create_extensions(network, extension_name, column_sets::AbstractVector)
+
+  Create extensions that need several dataframes. `column_sets` holds one column set (a
+  NamedTuple, `Dict`, or the pairs of a keyword list) per dataframe, in the order given by
+  the extension's creation schema. Trailing dataframes may be omitted and any dataframe may
+  be left empty (`(;)`). This mirrors pypowsybl's `create_extensions`, which accepts either
+  a single dataframe or a list of them.
+  """
+  function create_extensions(network::NetworkHandle, extension_name::String, column_sets::AbstractVector)
     builder = LibPowsybl.ElementDataframe()
-    _fill_builder!(builder, kwargs,
-                   LibPowsybl.get_extension_creation_metadata_names(extension_name),
-                   LibPowsybl.get_extension_creation_metadata_types(extension_name),
-                   LibPowsybl.get_extension_creation_metadata_indices(extension_name))
+    dataframe_count = max(Int(LibPowsybl.get_extension_creation_dataframes_count(extension_name)), 1)
+    for i in 0:(dataframe_count - 1)
+      columns = (i + 1) <= length(column_sets) ? column_sets[i + 1] : (;)
+      _fill_builder!(builder, pairs(columns),
+                     LibPowsybl.get_extension_creation_metadata_names_at(extension_name, i),
+                     LibPowsybl.get_extension_creation_metadata_types_at(extension_name, i),
+                     LibPowsybl.get_extension_creation_metadata_indices_at(extension_name, i))
+      LibPowsybl.finish_dataframe(builder)
+    end
     LibPowsybl.create_extensions(network.handle, builder, extension_name)
     return nothing
   end

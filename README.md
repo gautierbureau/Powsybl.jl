@@ -404,5 +404,20 @@ julia> Powsybl.Network.create_ratio_tap_changers(network;
 ```
 
 `create_phase_tap_changers` works the same way, with an extra `alpha` column in the
-steps. The generic `create_elements(network, element_type, column_sets)` (a vector with
-one column set per dataframe) covers any multi-dataframe element type.
+steps. Boundary lines follow the same pattern, their optional generation part being the
+second dataframe:
+
+```julia
+julia> Powsybl.Network.create_boundary_lines(network;
+           id = "BL1", voltage_level_id = "VL1", bus_id = "B1",
+           p0 = 10.0, q0 = 3.0, r = 0.1, x = 1.0, g = 0.0, b = 0.0,
+           generation = (id = "BL1", min_p = 0.0, max_p = 100.0, target_p = 50.0,
+                         target_q = 10.0, target_v = 400.0, voltage_regulator_on = true))
+```
+
+The generic `create_elements(network, element_type, column_sets)` (a vector with one
+column set per dataframe) covers any multi-dataframe element type, and
+`create_extensions(network, extension_name, column_sets)` does the same for extensions.
+
+Column names are checked against the dataframe schema: an unknown column, or a missing
+index column, raises an `ArgumentError` rather than being forwarded to PowSyBl.

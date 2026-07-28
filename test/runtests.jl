@@ -124,6 +124,57 @@ end
   @test "B3" in buses[:, "id"]
 end
 
+@testset "Test element creation validation" begin
+  network = Powsybl.Network.create_empty()
+  Powsybl.Network.create_substations(network; id = "S1", country = "FR")
+  Powsybl.Network.create_voltage_levels(network; id = "VL1", substation_id = "S1",
+                                        topology_kind = "BUS_BREAKER", nominal_v = 400.0)
+  Powsybl.Network.create_buses(network; id = "B1", voltage_level_id = "VL1")
+
+  # A column the schema does not declare is rejected rather than silently forwarded
+  @test_throws ArgumentError Powsybl.Network.create_loads(network; id = "L", voltage_level_id = "VL1",
+                                                          bus_id = "B1", p0 = 1.0, nonexistent_column = 1.0)
+  # ... including on update
+  @test_throws ArgumentError Powsybl.Network.update_loads(network; id = "L", nonexistent_column = 1.0)
+
+  # The index column identifies the rows, so it is required
+  @test_throws ArgumentError Powsybl.Network.create_loads(network; voltage_level_id = "VL1",
+                                                          bus_id = "B1", p0 = 1.0, q0 = 1.0)
+
+  # Mismatched column lengths are still rejected
+  @test_throws ArgumentError Powsybl.Network.create_buses(network; id = ["B2", "B3", "B4"],
+                                                          voltage_level_id = ["VL1", "VL1"])
+end
+
+@testset "Test boundary line creation with its generation part" begin
+  network = Powsybl.Network.create_empty()
+  Powsybl.Network.create_substations(network; id = "S1", country = "FR")
+  Powsybl.Network.create_voltage_levels(network; id = "VL1", substation_id = "S1",
+                                        topology_kind = "BUS_BREAKER", nominal_v = 400.0)
+  Powsybl.Network.create_buses(network; id = "B1", voltage_level_id = "VL1")
+
+  # Without a generation part: the second dataframe is sent empty
+  Powsybl.Network.create_boundary_lines(network; id = "BL1", voltage_level_id = "VL1", bus_id = "B1",
+                                        p0 = 10.0, q0 = 3.0, r = 0.1, x = 1.0, g = 0.0, b = 0.0)
+  boundary_lines = Powsybl.Network.get_boundary_lines(network)
+  @test "BL1" in boundary_lines[:, "id"]
+
+  # With a generation part, carried by the second creation dataframe
+  Powsybl.Network.create_boundary_lines(network; id = "BL2", voltage_level_id = "VL1", bus_id = "B1",
+                                        p0 = 10.0, q0 = 3.0, r = 0.1, x = 1.0, g = 0.0, b = 0.0,
+                                        generation = (id = "BL2", min_p = 0.0, max_p = 100.0,
+                                                      target_p = 50.0, target_q = 10.0,
+                                                      target_v = 400.0, voltage_regulator_on = true))
+  boundary_lines = Powsybl.Network.get_boundary_lines(network)
+  @test "BL2" in boundary_lines[:, "id"]
+
+  generation = Powsybl.Network.get_boundary_lines_generation(network)
+  row = findfirst(==("BL2"), generation[:, "id"])
+  @test row !== nothing
+  @test generation[row, "target_p"] == 50.0
+  @test generation[row, "max_p"] == 100.0
+end
+
 @testset "Test extension creation, update and removal" begin
   @test "activePowerControl" in Powsybl.Network.get_extensions_names()
   @test size(Powsybl.Network.get_extensions_information(), 1) >= 1

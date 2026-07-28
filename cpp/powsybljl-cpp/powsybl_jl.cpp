@@ -199,6 +199,7 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
   mod.set_const("NON_LINEAR_SHUNT_COMPENSATOR_SECTION", element_type::NON_LINEAR_SHUNT_COMPENSATOR_SECTION);
   mod.set_const("LINEAR_SHUNT_COMPENSATOR_SECTION", element_type::LINEAR_SHUNT_COMPENSATOR_SECTION);
   mod.set_const("BOUNDARY_LINE", element_type::BOUNDARY_LINE);
+  mod.set_const("BOUNDARY_LINE_GENERATION", element_type::BOUNDARY_LINE_GENERATION);
   mod.set_const("TIE_LINE", element_type::TIE_LINE);
   mod.set_const("LCC_CONVERTER_STATION", element_type::LCC_CONVERTER_STATION);
   mod.set_const("VSC_CONVERTER_STATION", element_type::VSC_CONVERTER_STATION);
@@ -517,10 +518,10 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
   // ===========================================================================
 
   mod.method("create_extensions", [] (pypowsybl::JavaHandle network, ElementDataframe& builder, std::string name) {
-            dataframe df = builder.build_dataframe();
+            std::vector<dataframe> dfs = builder.build_dataframes();
             dataframe_array dataframes;
-            dataframes.dataframes = &df;
-            dataframes.dataframes_count = 1;
+            dataframes.dataframes = dfs.data();
+            dataframes.dataframes_count = (int) dfs.size();
             pypowsybl::createExtensions(network, &dataframes, name);
     }, "Create extensions of a given name from a dataframe builder");
 
@@ -557,6 +558,38 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
             if (!metadata.empty()) { for (const auto& m : metadata[0]) { result.push_back(m.isIndex() ? 1 : 0); } }
             return result;
     }, "Get the index flags of the creation dataframe of an extension");
+
+  // Per-dataframe creation metadata, for the extensions that need several dataframes.
+  mod.method("get_extension_creation_dataframes_count", [] (std::string name) {
+            return (int) pypowsybl::getNetworkExtensionsCreationDataframesMetadata(name).size();
+    }, "Get the number of dataframes needed to create an extension");
+
+  mod.method("get_extension_creation_metadata_names_at", [] (std::string name, int dataframeIndex) {
+            std::vector<std::string> result;
+            auto metadata = pypowsybl::getNetworkExtensionsCreationDataframesMetadata(name);
+            if (dataframeIndex >= 0 && dataframeIndex < (int) metadata.size()) {
+                for (const auto& m : metadata[dataframeIndex]) { result.push_back(m.name()); }
+            }
+            return result;
+    }, "Get the series names of the i-th creation dataframe of an extension");
+
+  mod.method("get_extension_creation_metadata_types_at", [] (std::string name, int dataframeIndex) {
+            std::vector<int> result;
+            auto metadata = pypowsybl::getNetworkExtensionsCreationDataframesMetadata(name);
+            if (dataframeIndex >= 0 && dataframeIndex < (int) metadata.size()) {
+                for (const auto& m : metadata[dataframeIndex]) { result.push_back(m.type()); }
+            }
+            return result;
+    }, "Get the series types of the i-th creation dataframe of an extension");
+
+  mod.method("get_extension_creation_metadata_indices_at", [] (std::string name, int dataframeIndex) {
+            std::vector<int> result;
+            auto metadata = pypowsybl::getNetworkExtensionsCreationDataframesMetadata(name);
+            if (dataframeIndex >= 0 && dataframeIndex < (int) metadata.size()) {
+                for (const auto& m : metadata[dataframeIndex]) { result.push_back(m.isIndex() ? 1 : 0); }
+            }
+            return result;
+    }, "Get the index flags of the i-th creation dataframe of an extension");
 
   mod.method("get_extension_metadata_names", [] (std::string name, std::string tableName) {
             std::vector<std::string> result;
