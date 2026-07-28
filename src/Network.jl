@@ -421,7 +421,7 @@ module Network
   create_loads(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.LOAD; kwargs...)
   create_generators(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.GENERATOR; kwargs...)
   create_batteries(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.BATTERY; kwargs...)
-  create_dangling_lines(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.DANGLING_LINE; kwargs...)
+  create_boundary_lines(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.BOUNDARY_LINE; kwargs...)
   create_lines(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.LINE; kwargs...)
   create_2_windings_transformers(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.TWO_WINDINGS_TRANSFORMER; kwargs...)
   create_switches(network::NetworkHandle; kwargs...) = create_elements(network, LibPowsybl.SWITCH; kwargs...)
@@ -437,7 +437,7 @@ module Network
   update_loads(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.LOAD; kwargs...)
   update_generators(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.GENERATOR; kwargs...)
   update_batteries(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.BATTERY; kwargs...)
-  update_dangling_lines(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.DANGLING_LINE; kwargs...)
+  update_boundary_lines(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.BOUNDARY_LINE; kwargs...)
   update_lines(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.LINE; kwargs...)
   update_2_windings_transformers(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.TWO_WINDINGS_TRANSFORMER; kwargs...)
   update_switches(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.SWITCH; kwargs...)
@@ -446,6 +446,18 @@ module Network
   update_vsc_converter_stations(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.VSC_CONVERTER_STATION; kwargs...)
   update_lcc_converter_stations(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.LCC_CONVERTER_STATION; kwargs...)
   update_hvdc_lines(network::NetworkHandle; kwargs...) = update_elements(network, LibPowsybl.HVDC_LINE; kwargs...)
+
+  # Deprecated since pypowsybl 1.15.0 renamed the DANGLING_LINE element type to BOUNDARY_LINE.
+  # Kept as aliases for backward compatibility; use the boundary line versions instead.
+  function create_dangling_lines(network::NetworkHandle; kwargs...)
+    Base.depwarn("create_dangling_lines is deprecated, use create_boundary_lines instead.", :create_dangling_lines)
+    return create_boundary_lines(network; kwargs...)
+  end
+
+  function update_dangling_lines(network::NetworkHandle; kwargs...)
+    Base.depwarn("update_dangling_lines is deprecated, use update_boundary_lines instead.", :update_dangling_lines)
+    return update_boundary_lines(network; kwargs...)
+  end
 
   # ---------------------------------------------------------------------------
   # Extension creation, update and removal

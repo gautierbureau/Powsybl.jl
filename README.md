@@ -371,7 +371,7 @@ julia> Powsybl.Network.create_buses(network; id = ["B2", "B3"], voltage_level_id
 ```
 
 Convenience creators are available for `substations`, `voltage_levels`, `buses`,
-`busbar_sections`, `loads`, `generators`, `batteries`, `dangling_lines`, `lines`,
+`busbar_sections`, `loads`, `generators`, `batteries`, `boundary_lines`, `lines`,
 `2_windings_transformers`, `switches`, `static_var_compensators`,
 `lcc_converter_stations`, `vsc_converter_stations` and `hvdc_lines`, plus matching
 `update_*` helpers. The generic `create_elements(network, element_type; kwargs...)` and
