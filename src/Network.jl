@@ -373,28 +373,38 @@ module Network
       return _add_empty_index!(builder, index_names, type_by_name)
     end
 
-    # Each argument is one column, a scalar being a column of a single row. pypowsybl
-    # requires every argument to have the same number of values and does not broadcast a
-    # shorter one, so neither do we: the first argument sets the size.
-    row_count = _column_length(first(provided).second)
+    # The vector arguments give the number of rows and must all agree on it; a scalar is
+    # broadcast to fill it, so a column that is the same for every element can be written
+    # once. pypowsybl has no broadcasting and wants that column spelled out, so this accepts
+    # strictly more than it does.
+    #
+    # A one-element vector is deliberately not broadcast. A scalar is unambiguously meant
+    # for every row, whereas a one-element vector is usually the accidental result of a
+    # filter or an indexing expression, and repeating it silently would create a set of
+    # identical elements instead of reporting the mistake.
+    row_count = 1
+    sized_by = nothing
     for (key, value) in provided
-      size = _column_length(value)
-      if size != row_count
-        throw(ArgumentError("all arguments must have the same size, got size $size for " *
-                            "series \"$(String(key))\", expected $row_count"))
+      value isa AbstractVector || continue
+      size = length(value)
+      if sized_by === nothing
+        row_count = size
+        sized_by = String(key)
+      elseif size != row_count
+        throw(ArgumentError("all vector arguments must have the same size, got size $size " *
+                            "for series \"$(String(key))\", expected $row_count from series " *
+                            "\"$sized_by\" (a scalar is broadcast, a one-element vector is not)"))
       end
     end
 
     for (key, value) in provided
       column_name = String(key)
-      column = value isa AbstractVector ? collect(value) : [value]
+      column = value isa AbstractVector ? collect(value) : fill(value, row_count)
       type_code = get(type_by_name, column_name, _infer_series_type(column))
       _add_series!(builder, column_name, column_name in index_names, type_code, column)
     end
     return builder
   end
-
-  _column_length(value) = value isa AbstractVector ? length(value) : 1
 
   function _add_empty_index!(builder, index_names, type_by_name)
     for name in index_names
@@ -433,10 +443,11 @@ module Network
       create_elements(network, element_type; kwargs...)
 
   Create network elements of the given `element_type` (a `LibPowsybl.ElementType`).
-  Each keyword argument is a column of the creation dataframe; a value may be a scalar (one
-  element) or a vector (several at once), and all the arguments of one call must have the
-  same number of values. An argument left at `nothing` counts as not given. This is the
-  generic entry point behind the `create_*` helpers below.
+  Each keyword argument is a column of the creation dataframe; a value may be a vector (one
+  entry per element) or a scalar, which is broadcast to every element. The vector arguments
+  must all have the same length; a one-element vector is not broadcast. An argument left at
+  `nothing` counts as not given. This is the generic entry point behind the `create_*`
+  helpers below.
   """
   function create_elements(network::NetworkHandle, element_type::LibPowsybl.ElementType; kwargs...)
     # Goes through the multi-dataframe path so that a type whose schema declares several
