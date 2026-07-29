@@ -348,12 +348,21 @@ julia> Powsybl.Network.get_buses(network)
 ### Creating and updating elements
 
 Elements can be created and updated with an API mirroring pypowsybl: one keyword argument
-per column, each value a scalar (a single element) or a vector (several elements at once).
-As in pypowsybl, all the arguments of one call must have the same number of values — a
-scalar is a column of one row and is not stretched to match a longer one — and an argument
-left at `nothing` counts as not given. Columns are coerced to the type declared by the
-element's dataframe schema, so numeric literals work without an explicit type. The `id`
-column identifies the elements.
+per column, each value a vector (one entry per element) or a scalar, which is broadcast to
+every element so that a column shared by all of them can be written once. The vector
+arguments must all have the same length, and a one-element vector is *not* broadcast — that
+is nearly always an accidental filter result rather than a value meant for every row.
+An argument left at `nothing` counts as not given. Columns are coerced to the type declared
+by the element's dataframe schema, so numeric literals work without an explicit type. The
+`id` column identifies the elements.
+
+```julia
+julia> Powsybl.Network.create_buses(network; id = ["B1", "B2", "B3"], voltage_level_id = "VL1")
+```
+
+Broadcasting a scalar is the one place this API accepts more than pypowsybl, which requires
+every argument to have the same size and would want `voltage_level_id` spelled out three
+times here.
 
 ```julia
 julia> using Powsybl

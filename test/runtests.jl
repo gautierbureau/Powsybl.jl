@@ -146,10 +146,8 @@ end
   @test_throws ArgumentError Powsybl.Network.create_buses(network; id = ["B2", "B3", "B4"],
                                                           voltage_level_id = ["VL1", "VL1"])
 
-  # As in pypowsybl, a scalar is a column of one row and is not stretched to match a
-  # longer one: every argument of a call must have the same number of values
-  @test_throws ArgumentError Powsybl.Network.create_buses(network; id = ["B2", "B3"],
-                                                          voltage_level_id = "VL1")
+  # A one-element vector is not broadcast: it is nearly always an accidental filter
+  # result, and repeating it would silently create identical elements
   @test_throws ArgumentError Powsybl.Network.create_buses(network; id = ["B2", "B3"],
                                                           voltage_level_id = ["VL1"])
 
@@ -160,6 +158,33 @@ end
   buses = Powsybl.Network.get_bus_breaker_view_buses(network)
   @test "B2" in buses[:, "id"]
   @test "B3" in buses[:, "id"]
+end
+
+@testset "Test scalar broadcasting" begin
+  network = Powsybl.Network.create_empty()
+  Powsybl.Network.create_substations(network; id = "S1", country = "FR")
+  Powsybl.Network.create_voltage_levels(network; id = "VL1", substation_id = "S1",
+                                        topology_kind = "BUS_BREAKER", nominal_v = 400.0)
+
+  # A scalar column is shared by every element, so it is written once
+  Powsybl.Network.create_buses(network; id = ["B1", "B2", "B3"], voltage_level_id = "VL1")
+  buses = Powsybl.Network.get_bus_breaker_view_buses(network)
+  for id in ["B1", "B2", "B3"]
+    @test id in buses[:, "id"]
+    @test buses[findfirst(==(id), buses[:, "id"]), "voltage_level_id"] == "VL1"
+  end
+
+  # Mixing scalars and vectors of the same length works too
+  Powsybl.Network.create_loads(network; id = ["L1", "L2"], voltage_level_id = "VL1",
+                               bus_id = ["B1", "B2"], p0 = [10.0, 20.0], q0 = 1.0)
+  loads = Powsybl.Network.get_loads(network)
+  @test loads[findfirst(==("L1"), loads[:, "id"]), "q0"] == 1.0
+  @test loads[findfirst(==("L2"), loads[:, "id"]), "q0"] == 1.0
+  @test loads[findfirst(==("L2"), loads[:, "id"]), "p0"] == 20.0
+
+  # Vectors of different lengths are still rejected
+  @test_throws ArgumentError Powsybl.Network.create_buses(network; id = ["B4", "B5"],
+                                                          voltage_level_id = ["VL1", "VL1", "VL1"])
 end
 
 @testset "Test DataFrame input for creation and update" begin
