@@ -162,6 +162,43 @@ module SecurityAnalysis
   end
 
   """
+      add_limit_reductions(analysis; kwargs...)
+      add_limit_reductions(analysis, df::DataFrame)
+
+  Reduce the operational limits the analysis checks against. Each keyword argument is a
+  column of the limit reduction dataframe, or the whole table is given as a `DataFrame`.
+
+  A reduction is described by `limit_type` (only `"CURRENT"` is honoured by OpenLoadFlow),
+  `permanent` and `temporary` selecting which limits it applies to, and `value`, the factor
+  in `[0, 1]` the limit is multiplied by. It can be narrowed with `contingency_context`
+  (only `"ALL"` is honoured by OpenLoadFlow), `monitoring`, `min_temporary_duration` and
+  `max_temporary_duration`, `country`, `min_voltage` and `max_voltage`. When two reductions
+  apply to the same limit, the last one added wins.
+
+  The factor applied to each violated limit is reported in the `limit_reduction` column of
+  [`get_limit_violations`](@ref).
+
+  ```julia
+  julia> Powsybl.SecurityAnalysis.add_limit_reductions(analysis; limit_type = "CURRENT",
+             permanent = true, temporary = true, value = 0.8)
+  ```
+  """
+  function add_limit_reductions(analysis::SecurityAnalysisContext; kwargs...)
+    builder = LibPowsybl.ElementDataframe()
+    Network._fill_builder!(builder, kwargs,
+                           LibPowsybl.get_limit_reduction_metadata_names(),
+                           LibPowsybl.get_limit_reduction_metadata_types(),
+                           LibPowsybl.get_limit_reduction_metadata_indices())
+    LibPowsybl.add_limit_reductions(analysis.handle, builder)
+    return nothing
+  end
+
+  function add_limit_reductions(analysis::SecurityAnalysisContext, df::DataFrame; kwargs...)
+    Network._reject_mixed_input(kwargs)
+    return add_limit_reductions(analysis; Network._column_pairs(df)...)
+  end
+
+  """
       add_monitored_elements(analysis; contingency_context_type = ALL, branch_ids,
                              voltage_level_ids, three_windings_transformer_ids,
                              contingency_ids)

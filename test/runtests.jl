@@ -337,6 +337,41 @@ end
   Powsybl.SecurityAnalysis.get_three_windings_transformer_results(result)
 end
 
+@testset "Test security analysis limit reductions" begin
+  SA = Powsybl.SecurityAnalysis
+
+  # The eurostag example carries CURRENT limits, the only kind OpenLoadFlow reduces
+  function violations(; kwargs...)
+    network = Powsybl.Network.create_eurostag_tutorial_example1()
+    analysis = SA.create_analysis()
+    SA.add_single_element_contingency(analysis, "NHV1_NHV2_1", "co1")
+    isempty(kwargs) || SA.add_limit_reductions(analysis; kwargs...)
+    return SA.get_limit_violations(SA.run_ac(analysis, network))
+  end
+
+  base = violations()
+  @test all(==(1.0), base[:, "limit_reduction"])
+
+  # Reducing the limits reports the factor and surfaces violations the full limits hid
+  reduced = violations(limit_type = "CURRENT", contingency_context = "ALL",
+                       permanent = true, temporary = true, value = 0.9)
+  @test 0.9 in reduced[:, "limit_reduction"]
+  @test nrow(reduced) > nrow(base)
+
+  # The same table given as a DataFrame
+  network = Powsybl.Network.create_eurostag_tutorial_example1()
+  analysis = SA.create_analysis()
+  SA.add_single_element_contingency(analysis, "NHV1_NHV2_1", "co1")
+  SA.add_limit_reductions(analysis, DataFrame(limit_type = ["CURRENT"], contingency_context = ["ALL"],
+                                              permanent = [true], temporary = [true], value = [0.9]))
+  @test 0.9 in SA.get_limit_violations(SA.run_ac(analysis, network))[:, "limit_reduction"]
+
+  # The schema is enforced: unknown columns and a missing index column are rejected
+  other = SA.create_analysis()
+  @test_throws ArgumentError SA.add_limit_reductions(other; limit_type = "CURRENT", nonexistent = 1.0)
+  @test_throws ArgumentError SA.add_limit_reductions(other; permanent = true, value = 0.9)
+end
+
 @testset "Test security analysis parameters" begin
   parameters = Powsybl.SecurityAnalysis.Parameters()
   @test parameters.load_flow_parameters isa Powsybl.LoadFlow.LoadFlowParameters
