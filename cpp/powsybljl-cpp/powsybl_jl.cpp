@@ -678,6 +678,31 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
             pypowsybl::addContingency(analysisContext, contingencyId, elementsIds);
     }, "Add a contingency (list of element ids to trip) to a security analysis context");
 
+  // Limit reductions are described by a dataframe, built with the same builder as element
+  // creation and validated against the schema below.
+  mod.method("get_limit_reduction_metadata_names", [] () {
+            std::vector<std::string> result;
+            for (const auto& m : pypowsybl::getLimitReductionDataframeMetadata()) { result.push_back(m.name()); }
+            return result;
+    }, "Get the series names of the limit reduction dataframe");
+
+  mod.method("get_limit_reduction_metadata_types", [] () {
+            std::vector<int> result;
+            for (const auto& m : pypowsybl::getLimitReductionDataframeMetadata()) { result.push_back(m.type()); }
+            return result;
+    }, "Get the series types of the limit reduction dataframe");
+
+  mod.method("get_limit_reduction_metadata_indices", [] () {
+            std::vector<int> result;
+            for (const auto& m : pypowsybl::getLimitReductionDataframeMetadata()) { result.push_back(m.isIndex() ? 1 : 0); }
+            return result;
+    }, "Get the index flags of the limit reduction dataframe");
+
+  mod.method("add_limit_reductions", [] (pypowsybl::JavaHandle analysisContext, ElementDataframe& builder) {
+            dataframe df = builder.build_dataframe();
+            pypowsybl::addLimitReductions(analysisContext, &df);
+    }, "Add limit reductions to a security analysis context from a dataframe builder");
+
   mod.method("add_monitored_elements", [] (pypowsybl::JavaHandle analysisContext, contingency_context_type contingencyContextType,
                                            std::vector<std::string> const& branchIds,
                                            std::vector<std::string> const& voltageLevelIds,
