@@ -119,17 +119,36 @@ check on `Σy` against up/down regulating headroom); the exchange version is the
 
 Worth recording, because it changes what "matching the reference" means.
 
-The reference decomposes into **eight** subproblems: `ulp`, `mlp`, `llp` (the three levels),
-`cpf` (copper-plate), `obbt` (optimisation-based bound tightening), `filter`, `aux`, `wcgen`.
+The reference decomposes into **eight** programs, which split into two groups.
 
-* It runs **two bounding procedures in parallel threads** — a **lower-bounding** and an
-  **upper-bounding** pass — each with *its own* medial (min–max) solver. They differ in the RHS
-  restriction: `ε_R = 0` for the lower bound, `ε_R > 0` for the upper bound.
-* **`aux`** is the RRHS-based upper-bounding heuristic.
-* **`wcgen`** is worst-case scenario generation — a variant of the medial with a modified
-  objective, run as a validation/post-processing step to certify the reported interval.
-* **`filter`** is a cheap pre-screen: the largest limit violation over the OBBT-relaxed grid
-  (deliberately conservative), used to discard work before the expensive solves.
+**Prior/standalone procedures**, each its own binary, run before the main solve (none of them
+appears in the solver loop):
+
+* **`obbt`** — optimisation-based bound tightening: conservative bounds on the variables.
+* **`cpf`** — copper-plate feasibility: the exchange interval attainable ignoring line limits,
+  which brackets the search range (see *Copper-plate* above).
+* **`filter`** — monitored-line screening ("check if given monitored lines have potential for
+  having a violation"). It maximises the largest flow/limit ratio over the **OBBT-relaxed** grid,
+  across all three cases and both directions. Being computed on the relaxed grid it is
+  deliberately conservative, so a monitored line whose ratio cannot reach 1 can never be violated
+  and may be dropped — shrinking the expensive MILPs that follow.
+
+**The iteration itself** uses the two outer levels plus **three MLP-shaped programs**:
+
+* **`ulp`** (preventive) and **`llp`** (corrective) — the upper and lower levels.
+* **`mlp`** — the canonical medial (worst-case) program.
+* **`aux`** — the RRHS-style auxiliary upper-bounding heuristic (a variant of the medial that
+  maximises one quantity while constraining the other to stay positive).
+* **`wcgen`** — worst-case scenario generation: the medial with a revised objective, used to
+  certify the reported interval.
+
+`cpf` and `wcgen` (and `aux`) are all *derived from* the medial formulation — each is the medial
+with a modified objective and an extra constraint — which is why they share its variables.
+
+Separately, the solve runs a **lower-bounding and an upper-bounding procedure in parallel
+threads**, differing in the RHS restriction (`ε_R = 0` for the lower bound, `ε_R > 0` for the
+upper). Each thread instantiates the canonical medial; that is two *instances* of one program,
+not two distinct programs.
 
 **The outer (preventive) optimisation is currently disabled.** The specialised flexibility solver
 — the subclass that would optimise the preventive actions `x` together with `δ`, with the dual
