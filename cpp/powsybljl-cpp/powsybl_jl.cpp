@@ -323,4 +323,67 @@ JLCXX_MODULE define_module_powsybl(jlcxx::Module& mod)
   mod.method("create_loadflow_provider_parameters_series_array", [] (const std::string& provider) {
             return pypowsybl::createLoadFlowProviderParametersSeriesArray(provider);
     }, "Create a parameters series array for a given loadflow provider");
+
+  // ---------------------------------------------------------------------------
+  // Scalable (distributed active-power scaling)
+  // ---------------------------------------------------------------------------
+
+  // CxxWrap has no factory for a std::vector of the wrapped JavaHandle type (which is
+  // not default-constructible), so expose it as an opaque, incrementally built container
+  // - same approach as StringStringMap above.
+  mod.add_type<std::vector<pypowsybl::JavaHandle>>("JavaHandleVector")
+        .method("push_handle", [] (std::vector<pypowsybl::JavaHandle>& v, pypowsybl::JavaHandle h) {
+          v.push_back(h);
+       });
+
+  // How the asked variation is interpreted (a delta, or an absolute target).
+  mod.add_bits<pypowsybl::ScalingType>("ScalingType", jlcxx::julia_type("CppEnum"));
+  mod.set_const("DELTA_P", pypowsybl::ScalingType::DELTA_P);
+  mod.set_const("TARGET_P", pypowsybl::ScalingType::TARGET_P);
+
+  // What is respected when the asked volume cannot be fully distributed.
+  mod.add_bits<pypowsybl::Priority>("ScalingPriority", jlcxx::julia_type("CppEnum"));
+  mod.set_const("RESPECT_OF_VOLUME_ASKED", pypowsybl::Priority::RESPECT_OF_VOLUME_ASKED);
+  mod.set_const("RESPECT_OF_DISTRIBUTION", pypowsybl::Priority::RESPECT_OF_DISTRIBUTION);
+  mod.set_const("ONESHOT", pypowsybl::Priority::ONESHOT);
+
+  // Sign convention: a positive scaling increases generation, or increases load.
+  mod.add_bits<pypowsybl::ScalingConvention>("ScalingConvention", jlcxx::julia_type("CppEnum"));
+  mod.set_const("GENERATOR_SCALING_CONVENTION", pypowsybl::ScalingConvention::GENERATOR_SCALING_CONVENTION);
+  mod.set_const("LOAD_SCALING_CONVENTION", pypowsybl::ScalingConvention::LOAD_SCALING_CONVENTION);
+
+  // How a proportional scalable distributes a variation across its injections.
+  mod.add_bits<distribution_mode>("DistributionMode", jlcxx::julia_type("CppEnum"));
+  mod.set_const("PROPORTIONAL_TO_TARGETP", distribution_mode::PROPORTIONAL_TO_TARGETP);
+  mod.set_const("PROPORTIONAL_TO_PMAX", distribution_mode::PROPORTIONAL_TO_PMAX);
+  mod.set_const("PROPORTIONAL_TO_DIFF_PMAX_TARGETP", distribution_mode::PROPORTIONAL_TO_DIFF_PMAX_TARGETP);
+  mod.set_const("PROPORTIONAL_TO_DIFF_TARGETP_PMIN", distribution_mode::PROPORTIONAL_TO_DIFF_TARGETP_PMIN);
+  mod.set_const("PROPORTIONAL_TO_P0", distribution_mode::PROPORTIONAL_TO_P0);
+  mod.set_const("UNIFORM_DISTRIBUTION", distribution_mode::UNIFORM_DISTRIBUTION);
+
+  CustomMapper<pypowsybl::ScalingParameters> scalingParametersMapper(mod, "ScalingParameters");
+  scalingParametersMapper.jlcxx_wrapper()
+     .constructor([] () {
+       return pypowsybl::createScalingParameters();
+    });
+  scalingParametersMapper
+    .method_readwrite("scaling_convention", &pypowsybl::ScalingParameters::scaling_convention)
+    .method_readwrite("constant_power_factor", &pypowsybl::ScalingParameters::constant_power_factor)
+    .method_readwrite("reconnect", &pypowsybl::ScalingParameters::reconnect)
+    .method_readwrite("allows_generator_out_of_active_power_limits", &pypowsybl::ScalingParameters::allows_generator_out_of_active_power_limits)
+    .method_readwrite("priority", &pypowsybl::ScalingParameters::priority)
+    .method_readwrite("scaling_type", &pypowsybl::ScalingParameters::scaling_type)
+    .method_readwrite("ignored_injection_ids", &pypowsybl::ScalingParameters::ignored_injection_ids);
+
+  mod.method("create_scalable", [] (int scalableType, const std::string& injectionId, double minValue, double maxValue, const std::vector<pypowsybl::JavaHandle>& children, std::vector<double> percentages) {
+            return pypowsybl::createScalable(scalableType, injectionId, minValue, maxValue, children, percentages);
+    }, "Create a scalable (element / stack / proportional / up-down)");
+
+  mod.method("scale", [] (pypowsybl::JavaHandle network, pypowsybl::JavaHandle scalable, const pypowsybl::ScalingParameters& parameters, double asked) {
+            return pypowsybl::scale(network, scalable, parameters, asked);
+    }, "Apply an active-power scaling to a network, returning the amount actually applied");
+
+  mod.method("compute_proportional_scalable_percentages", [] (const std::vector<std::string>& injectionIds, distribution_mode mode, pypowsybl::JavaHandle network) {
+            return pypowsybl::computeProportionalScalablePercentages(injectionIds, mode, network);
+    }, "Compute proportional distribution keys for a set of injections");
 }

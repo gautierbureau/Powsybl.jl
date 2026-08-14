@@ -86,3 +86,36 @@ end
   result = Powsybl.LoadFlow.run_dc(network, parameters)
   @test size(result.component_results, 1) == 1
 end
+
+@testset "Test scalable" begin
+  SC = Powsybl.Scalable
+
+  # Default scaling parameters expose editable, typed fields
+  p = SC.ScalingParameters()
+  @test p.scaling_convention == SC.GENERATOR_SCALING_CONVENTION
+  @test p.scaling_type == SC.DELTA_P
+  @test p.priority == SC.ONESHOT
+  @test p.reconnect == false
+  @test p.ignored_injection_ids == String[]
+
+  # An element scalable shifts a single generator's target by the asked delta
+  network = Powsybl.Network.create_ieee9()
+  before = Powsybl.Network.get_generators(network)[1, "target_p"]
+  @test SC.scale(SC.injection("B1-G"), network, 50.0) == 50.0
+  after = Powsybl.Network.get_generators(network)[1, "target_p"]
+  @test after ≈ before + 50.0
+
+  # A proportional scalable splits the variation across its children
+  network2 = Powsybl.Network.create_ieee9()
+  prop = SC.proportional([SC.injection("B2-G"), SC.injection("B3-G")], [60.0, 40.0])
+  @test SC.scale(prop, network2, 100.0) == 100.0
+
+  # A stack scalable fills children in order
+  network3 = Powsybl.Network.create_ieee9()
+  @test SC.scale(SC.stack(SC.injection("B2-G"), SC.injection("B3-G")), network3, 30.0) == 30.0
+
+  # Proportional distribution keys sum to 100
+  pct = SC.compute_proportional_percentages(["B1-G", "B2-G", "B3-G"], network2, SC.PROPORTIONAL_TO_PMAX)
+  @test length(pct) == 3
+  @test sum(pct) ≈ 100.0
+end
