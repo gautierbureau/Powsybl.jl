@@ -633,6 +633,11 @@ The smallest zone import at which no corrective response keeps every monitored b
 limits, searched within `[0, e_cap]`. Returns `nothing` when the grid is securable across the
 whole range — i.e. when `e_cap` itself is achievable.
 
+`direction` selects the sense of the transfer — `-1` (the default) measures an **import** by the
+zone, `+1` an **export** — and `offset` shifts the zero point when the forecast exchange is itself
+non-zero, so that `E` is measured from the intended reference rather than from the forecast. The
+zone's net deviation is held at `direction * E + offset`.
+
 `restriction` is a required **security margin**, with the same meaning and the same direction as in
 [`worst_case_oracle`](@ref): a branch counts as failing when it no longer keeps the margin, so a
 larger restriction reports a **smaller** (conservative) frontier. All other keywords match the
@@ -651,6 +656,7 @@ function min_violating_exchange(network;
                                 pst_model::AbstractDict = Dict{String,Any}(),
                                 slack::Union{Nothing,String} = nothing,
                                 optimizer = HiGHS.Optimizer, restriction = 0.0, tol = 1e-5,
+                                direction = -1.0, offset = 0.0,
                                 max_iter = 30, bigM = 1e4, balance_bigM = 1e5, silent = true)
     gm = GridModel(network; slack = slack)
     for h in hvdc
@@ -673,7 +679,10 @@ function min_violating_exchange(network;
             v[n] = vn
         end
         E = @variable(model, base_name = "E"); set_lower_bound(E, 0.0); set_upper_bound(E, e_cap)
-        @constraint(model, zone_exchange(v, (buses = zone,)) == -E)   # import ⇒ negative deviation
+        # The zone's net deviation realises the exchange: `direction` selects which way the
+        # transfer runs (−1, the default, is an import by the zone) and `offset` shifts the zero
+        # point when the forecast exchange is not itself zero.
+        @constraint(model, zone_exchange(v, (buses = zone,)) == direction * E + offset)
         inj_unc, inj_nom, drop_slack = _injection_model!(model, gm, participation, v, balance_bigM)
         for (j, cand) in enumerate(menu)
             sel = VariableRef[]

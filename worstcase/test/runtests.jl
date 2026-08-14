@@ -368,3 +368,22 @@ end
                               exchange = (buses = ["VL3_0"], lo = -(e1 - 0.5), hi = 0.0))
     @test W.is_secure(sol)
 end
+
+@testset "Exchange direction and zero point" begin
+    # `direction` picks the sense of the transfer and `offset` moves the reference the exchange is
+    # measured from — needed whenever the forecast exchange is not itself zero.
+    box = Dict("VL3_0" => (-400.0, 400.0))
+    mon = Dict("L12a" => 110.0)
+    f(dir, off) = W.min_violating_exchange(build_ext(); zone = ["VL3_0"], uncertain = box,
+                      monitored = mon, e_cap = 2000.0, direction = dir, offset = off)
+    imp = f(-1.0, 0.0)
+    @test imp !== nothing
+    # shifting the zero point moves the measured exchange one-for-one, same physical frontier
+    imp50 = f(-1.0, 50.0)
+    @test imp50 !== nothing
+    @test imp50[1] ≈ imp[1] + 50.0 atol = 0.5
+    @test imp50[2]["VL3_0"] ≈ imp[2]["VL3_0"] atol = 0.5   # same binding injection
+    # the opposite sense is a different frontier (the corridor reverses)
+    exp_ = f(+1.0, 0.0)
+    @test exp_ === nothing || !isapprox(exp_[1], imp[1]; atol = 1.0)
+end
