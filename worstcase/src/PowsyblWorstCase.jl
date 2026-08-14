@@ -640,6 +640,10 @@ Besides `uncertain`, `monitored`, `correctives`, `contingencies` and `participat
   with the trip propagating forward through the states. Its multiple (locally-consistent)
   equilibria are resolved to the physical one by a connected-reference trip test, so the automaton
   composes with the free `correctives` (the max/min bounds meet).
+* `restriction` — tighten the security test by `ε_R ≥ 0`: the grid counts as secure only with a
+  margin, `φ ≤ −ε_R`. A restricted answer is **conservative**, so a configuration it accepts is
+  securable with room to spare — the restriction-of-the-right-hand-side idea, used to obtain
+  guaranteed-achievable values rather than the exact frontier. `0` gives the exact test.
 * `exchange` — `(; buses, lo, hi)` to use the **exchange parameterisation**: the uncertainty is
   restricted to realisations whose net injection deviation over `buses` (the zone's exchange) lies
   in `[lo, hi]`. `uncertain` then bounds how the exchange may be composed per bus, while `lo`/`hi`
@@ -651,7 +655,7 @@ function worst_case_oracle(network;
                            participation::Union{Nothing,AbstractDict} = nothing,
                            hvdc = NamedTuple[], switchable = String[], pst_limits::AbstractDict = Dict{String,Float64}(),
                            pst_model::AbstractDict = Dict{String,Any}(),
-                           exchange = nothing,
+                           exchange = nothing, restriction = 0.0,
                            slack::Union{Nothing,String} = nothing,
                            optimizer = HiGHS.Optimizer, tol = 1e-5, max_iter = 30,
                            bigM = 1e4, balance_bigM = 1e5, silent = true)
@@ -682,7 +686,8 @@ function worst_case_oracle(network;
                                     participation, pst_limits, pst_model, candidates, bigM, optimizer, silent, balance_bigM, exchange)
         lb, _ = _corrective_response(gm, states, monitored, correctives, switch, conts,
                                      participation, pst_limits, pst_model, vstar, optimizer, silent, bigM, balance_bigM)
-        return WorstCaseSolution(lb, lb <= tol, vstar, Dict{String,Dict{String,Float64}}(), 1, lb, ub)
+        return WorstCaseSolution(lb, lb <= tol - restriction, vstar,
+                                 Dict{String,Dict{String,Float64}}(), 1, lb, ub)
     end
 
     for k in 1:max_iter
@@ -706,7 +711,7 @@ function worst_case_oracle(network;
     end
 
     phi = best_lb
-    return WorstCaseSolution(phi, phi <= tol, vstar, corr_by_c, iterations, best_lb, ub)
+    return WorstCaseSolution(phi, phi <= tol - restriction, vstar, corr_by_c, iterations, best_lb, ub)
 end
 
 end # module

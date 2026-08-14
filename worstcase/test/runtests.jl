@@ -295,6 +295,24 @@ end
     @test nolim.phi > loose.phi                   # a wider transfer ⇒ a worse overload
 end
 
+@testset "Restricted security test (conservative margin)" begin
+    # Base flow ≈ 70.4 MW against a 110 MW limit ⇒ φ ≈ −0.36: secure with 36% of margin. A
+    # restriction below that margin still accepts; one above it rejects, even though φ is unchanged.
+    sol0 = W.worst_case_oracle(build_ext(); uncertain = NO_UNC, monitored = Dict("L12a" => 110.0))
+    margin = -sol0.phi
+    @test margin ≈ 1 - 200.0 * 500 / 700 * (291.67 / 591.67) / 110 atol = 5e-3
+    @test W.is_secure(sol0)
+
+    ok = W.worst_case_oracle(build_ext(); uncertain = NO_UNC, monitored = Dict("L12a" => 110.0),
+                             restriction = margin / 2)
+    tight = W.worst_case_oracle(build_ext(); uncertain = NO_UNC, monitored = Dict("L12a" => 110.0),
+                                restriction = margin * 2)
+    @test W.is_secure(ok)
+    @test !W.is_secure(tight)
+    @test ok.phi ≈ sol0.phi atol = 1e-9        # the restriction moves the test, not the value
+    @test tight.phi ≈ sol0.phi atol = 1e-9
+end
+
 @testset "Base-only robust check (no contingency, no corrective action)" begin
     # With no contingency there is no post-corrective state, so the PST cannot act; extra load
     # that overloads L12a in the base state is therefore uncorrectable.
