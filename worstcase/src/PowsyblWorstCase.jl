@@ -633,8 +633,14 @@ The smallest zone import at which no corrective response keeps every monitored b
 limits, searched within `[0, e_cap]`. Returns `nothing` when the grid is securable across the
 whole range — i.e. when `e_cap` itself is achievable.
 
-`restriction` requires the violation to exceed a margin, making the answer conservative. All other
-keywords match [`worst_case_oracle`](@ref).
+`restriction` is a required **security margin**, with the same meaning and the same direction as in
+[`worst_case_oracle`](@ref): a branch counts as failing when it no longer keeps the margin, so a
+larger restriction reports a **smaller** (conservative) frontier. All other keywords match the
+oracle.
+
+The value is **exact** on return, not tolerance-limited: the menu minimiser satisfies
+`E_menu ≤ E_true`, and when it is verified to defeat *every* corrective response it also witnesses
+`E_true ≤ e`, so the two coincide.
 """
 function min_violating_exchange(network;
                                 zone, uncertain::AbstractDict, monitored::AbstractDict, e_cap::Real,
@@ -677,7 +683,7 @@ function min_violating_exchange(network;
                             (pid, c) -> (haskey(cand, (pid, c)) ? cand[(pid, c)].open : nothing),
                             function (o)
                                 b = @variable(model, binary = true); push!(sel, b)
-                                @constraint(model, o >= restriction - bigM * (1 - b))
+                                @constraint(model, o >= -restriction - bigM * (1 - b))
                             end)
             @constraint(model, sum(sel) == 1)      # this response must leave some branch violated
         end
@@ -691,7 +697,7 @@ function min_violating_exchange(network;
         phi, ac = _corrective_response(gm, states, monitored, correctives, switch, conts,
                                        participation, pst_limits, pst_model, vstar,
                                        optimizer, silent, bigM, balance_bigM)
-        phi > restriction - tol && return (e, vstar)   # genuinely uncorrectable ⇒ the frontier
+        phi > -restriction - tol && return (e, vstar)  # genuinely uncorrectable ⇒ the frontier
         push!(menu, ac)                                # correctable ⇒ enrich the menu and retry
     end
     return nothing

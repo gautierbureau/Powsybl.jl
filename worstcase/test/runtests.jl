@@ -353,3 +353,18 @@ end
     @test W.is_secure(below)
     @test !W.is_secure(above)
 end
+
+@testset "Restriction has one meaning across both formulations" begin
+    # `restriction` is a security margin everywhere: tightening it must move the reported frontier
+    # *down* whichever way it is computed. (It previously moved the cut formulation the wrong way.)
+    box = Dict("VL3_0" => (-400.0, 0.0))
+    mon = Dict("L12a" => 110.0)
+    frontier(r) = W.min_violating_exchange(build_ext(); zone = ["VL3_0"], uncertain = box,
+                                           monitored = mon, e_cap = 400.0, restriction = r)[1]
+    e0, e1 = frontier(0.0), frontier(0.1)
+    @test e1 < e0                              # a margin costs transfer, as in the oracle
+    # and the conservative frontier really is secure by the oracle's own restricted test
+    sol = W.worst_case_oracle(build_ext(); uncertain = box, monitored = mon, restriction = 0.1,
+                              exchange = (buses = ["VL3_0"], lo = -(e1 - 0.5), hi = 0.0))
+    @test W.is_secure(sol)
+end
