@@ -115,15 +115,42 @@ uncertain injections at zero, solved in both directions and intersected, then wi
 generator-sum bound. Our `copperplate_bound` implements the scaled-hyperbox equivalent (an interval
 check on `Σy` against up/down regulating headroom); the exchange version is the next slice.
 
+## Solver structure — what the reference actually runs
+
+Worth recording, because it changes what "matching the reference" means.
+
+The reference decomposes into **eight** subproblems: `ulp`, `mlp`, `llp` (the three levels),
+`cpf` (copper-plate), `obbt` (optimisation-based bound tightening), `filter`, `aux`, `wcgen`.
+
+* It runs **two bounding procedures in parallel threads** — a **lower-bounding** and an
+  **upper-bounding** pass — each with *its own* medial (min–max) solver. They differ in the RHS
+  restriction: `ε_R = 0` for the lower bound, `ε_R > 0` for the upper bound.
+* **`aux`** is the RRHS-based upper-bounding heuristic.
+* **`wcgen`** is worst-case scenario generation — a variant of the medial with a modified
+  objective, run as a validation/post-processing step to certify the reported interval.
+* **`filter`** is a cheap pre-screen: the largest limit violation over the OBBT-relaxed grid
+  (deliberately conservative), used to discard work before the expensive solves.
+
+**The outer (preventive) optimisation is currently disabled.** The specialised flexibility solver
+— the subclass that would optimise the preventive actions `x` together with `δ`, with the dual
+AUX threads — is compiled but its instantiation is commented out; the shipped tool always uses the
+base solver and **reports the maximum exchange for a fixed preventive dispatch**.
+
+That matters for us: our `flexibility_max` over a *fixed* dispatch is therefore comparable to what
+the reference actually ships, and jointly optimising `x` is beyond what either currently does.
+
 ## Gaps / roadmap (highest leverage first)
 
 1. **Exchange (power-transfer) parameterization** — the reference's *primary* objective is
    max-exchange, not hyperbox-δ. Add a directional region `y = y⁰ + δ·d` and the matching
-   copper-plate exchange interval so results are directly comparable.
-2. **Outer ULP discretization + RRHS upper-bounding** — we have the oracle (medial↔lower) solid;
-   the outer discretization with the RRHS restriction (`SemiInfinite.solve_rrhs` / `solve_esip_bnf`)
-   is what turns it into the full flexibility solver. The `ignore_disc` machinery is specifically the
-   piece that lets the full-PST automaton compose inside that outer loop.
+   copper-plate exchange interval so results are directly comparable. This is the single change
+   that would put us on the same footing as the shipped reference.
+2. **Two-sided bounding + worst-case-generation certificate** — replace our plain bisection with a
+   lower/upper bounding pair (the RRHS restriction gives the conservative side, via
+   `SemiInfinite.solve_rrhs`), and add a final worst-case-generation pass that certifies the
+   reported interval. Jointly optimising the preventive actions `x` (`solve_esip_bnf` as the outer
+   driver) sits *above* this and is disabled in the reference — treat it as exploratory, not as
+   parity work.
 3. **Richer load balancing** — merit-order (generators hit bounds in a fixed order) and **emergency
    generators** (inject only when all others are capped), on top of our participation + saturation.
 4. **`discrete_shifter`** (discrete-tap PST) and a **corrective line automaton** as device types.
