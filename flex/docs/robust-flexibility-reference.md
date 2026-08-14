@@ -49,10 +49,11 @@ with `x` the preventive actions (generator set-points). This is a three-level pr
 | Min–max feasibility oracle | `PowsyblWorstCase.worst_case_oracle` | the grid solver (MLP↔LLP) |
 | Blankenship–Falk cutting plane | `SemiInfinite.solve_bnf` | discretization loop |
 | RRHS (restriction of the RHS) | `SemiInfinite.solve_rrhs` | AUX upper-bounding heuristic |
-| Falk–Hoffman min–max | `SemiInfinite.solve_minmax` | worst-case scenario generation |
+| Falk–Hoffman min–max | `SemiInfinite.solve_minmax` | the medial solver (serves both `mlp` and `wcgen`) |
 | Existence-constrained SIP | `SemiInfinite.solve_esip_bnf` | outer ESIP driver |
 | Flexibility maximisation | `PowsyblFlexibility.flexibility_max` | the flexibility solver |
-| Copper-plate bound / pre-filter | `PowsyblFlexibility.copperplate_bound` | the copper-plate feasibility interval |
+| Copper-plate bound / pre-filter | `PowsyblFlexibility.copperplate_bound`, `copperplate_exchange_interval` | the copper-plate feasibility interval |
+| Exchange parameterisation | `PowsyblWorstCase` `exchange=`, `PowsyblFlexibility.max_exchange` | the exchange variable the objectives are written in |
 
 The factoring lines up almost one-to-one, which is good evidence the split is the right one.
 
@@ -112,8 +113,9 @@ a single bus. The largest region still balanceable by the responding generation 
 pre-filter** (copper-plate infeasibility ⇒ network infeasibility, no MILP needed). The reference
 computes this as an **exchange interval**: the min/max exchange achievable with the controllable
 uncertain injections at zero, solved in both directions and intersected, then widened by the
-generator-sum bound. Our `copperplate_bound` implements the scaled-hyperbox equivalent (an interval
-check on `Σy` against up/down regulating headroom); the exchange version is the next slice.
+generator-sum bound. We now have both: `copperplate_bound` for the scaled hyperbox and
+`copperplate_exchange_interval` for the transfer form, each an interval check of the net deviation
+against up/down regulating headroom.
 
 ## Solver structure — what the reference actually runs
 
@@ -140,7 +142,10 @@ appears in the solver loop):
 * **`aux`** — the RRHS-style auxiliary upper-bounding heuristic (a variant of the medial that
   maximises one quantity while constraining the other to stay positive).
 * **`wcgen`** — worst-case scenario generation: the medial with a revised objective, used to
-  certify the reported interval.
+  certify the reported interval. Note the term is the *reference's*: it is **not** our
+  `PowsyblWorstCase` (a security test at a fixed uncertainty set) but the production of the
+  explicit binding scenario for a reported range. We call that a *certifying scenario* to keep
+  the two apart.
 
 `cpf` and `wcgen` (and `aux`) are all *derived from* the medial formulation — each is the medial
 with a modified objective and an extra constraint — which is why they share its variables.

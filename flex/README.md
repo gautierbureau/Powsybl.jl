@@ -16,6 +16,32 @@ The inner test — *for every `y` there exists a corrective response* — is exa
 `φ ≤ 0`. Since `φ(δ)` increases monotonically with `δ`, `δ*` is found by **bisection**, each step
 a single oracle call.
 
+## Two senses of "worst case" — and how this package uses the other one
+
+The phrase is overloaded, so to be explicit:
+
+* **[`PowsyblWorstCase`](../worstcase)** — the *security oracle*. Given a **fixed** uncertainty
+  set it answers *is this grid securable?*, returning `φ` (`≤ 0` ⇔ secure) and the binding
+  injection. The uncertainty set is an **input**.
+* **This package** — the *outer search*. It makes that set the **unknown** and asks *how large can
+  it be?*, calling the oracle repeatedly.
+
+So the whole of `PowsyblFlexibility` is a search wrapped around the oracle. Concretely it uses
+exactly two things from it:
+
+```julia
+W.GridModel(network)        # for the copper-plate (generation headroom only)
+W.worst_case_oracle(...)    # the security test inside each bisection step
+```
+
+Everything else here — the region parameterisations, the copper-plate bounds, the bisection — is
+search logic; none of the grid physics lives in this package.
+
+**A third thing is *not* the same:** producing the explicit scenario that *certifies* a reported
+answer. That is a different objective over the same model (maximise the violation across the whole
+reported range, rather than test one set), and it is a deferred item. To keep it distinct from the
+oracle we call it a **certifying scenario**, not "worst-case generation".
+
 ## The copper-plate oracle (upper bound + pre-filter)
 
 Dropping **every branch limit** collapses the grid to a single bus: the only requirement left is
@@ -102,7 +128,7 @@ Fixed preventive dispatch; both region parameterisations — the **scaled hyperb
 **power transfer** (`max_exchange`); the **copper-plate** bound and pre-filter for each; and
 **bisection** driving the worst-case oracle, with a **restriction** for conservative answers.
 Deferred: racing the restricted pass against the exact one (a pure wall-clock win, no change to
-the answer), a worst-case-generation pass to certify the reported interval, the medial's
+the answer), a **certifying-scenario** pass to certify the reported interval, the medial's
 low-exchange/high-violation balance term (which belongs with an exchange *discretization* loop
 rather than bisection), and jointly optimising the **preventive actions** `x` with the metric via
 the existence-constrained SIP outer loop ([`SemiInfinite`](../sip)).
