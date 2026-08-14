@@ -1,0 +1,131 @@
+<!--
+Copyright (c) 2025, RTE (http://www.rte-france.com)
+This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this
+file, You can obtain one at http://mozilla.org/MPL/2.0/.
+SPDX-License-Identifier: MPL-2.0
+-->
+
+# Robust flexibility analysis — design notes and reference comparison
+
+This note records how the Julia packages in this repository (`SemiInfinite`, `PowsyblWorstCase`,
+`PowsyblDcOpf`, `PowsyblFlexibility`) reproduce the robust security / flexibility-analysis method,
+and how they map onto the reference C++ implementation studied alongside this work. It is meant to
+orient the next implementation slices — it is not user documentation.
+
+The underlying method is published:
+
+* *Optimizing Flexibility in Power Systems by Maximizing the Region of Manageable Uncertainties*
+  (Optimization and Engineering, 2025) — the flexibility-maximisation formulation.
+* The worst-case security papers (hierarchical three-level worst-case analysis of power grids).
+
+## The problem
+
+For a **fixed preventive dispatch**, the grid is **secure** iff, under the worst injection
+uncertainty, corrective control can keep every monitored branch within its limit across all four
+operating states. That inner question is a min–max feasibility test:
+
+```
+φ = max_{v ∈ V}  min_{u_c ∈ U_c}  max_{(e, s)}  ( |P_{e,s}(v, u_c)| / P̂_{e,s}^{s} − 1 )
+```
+
+Secure ⇔ `φ ≤ 0`. **Flexibility** wraps this: grow the uncertainty region `T(δ)` (a scaled
+hyperbox, or a power-transfer/"exchange" direction) and maximise the `δ` that stays secure — an
+**existence-constrained semi-infinite program** (ESIP):
+
+```
+max_{δ ≥ 0, x ∈ X} δ   s.t.   ∀ y ∈ T(δ, x)  ∃ u_c :  all limits met
+```
+
+with `x` the preventive actions (generator set-points). This is a three-level program:
+**outer** (maximise `δ`, choose `x`) / **medial** (find the worst `y`) / **lower** (best corrective
+`u_c`).
+
+## Layer mapping
+
+| Concept | This repo | Reference implementation |
+|---|---|---|
+| DC power flow (θ / PTDF) | `PowsyblDcOpf` | `edge/*` admittance line models |
+| Min–max feasibility oracle | `PowsyblWorstCase.worst_case_oracle` | the grid solver (MLP↔LLP) |
+| Blankenship–Falk cutting plane | `SemiInfinite.solve_bnf` | discretization loop |
+| RRHS (restriction of the RHS) | `SemiInfinite.solve_rrhs` | AUX upper-bounding heuristic |
+| Falk–Hoffman min–max | `SemiInfinite.solve_minmax` | worst-case scenario generation |
+| Existence-constrained SIP | `SemiInfinite.solve_esip_bnf` | outer ESIP driver |
+| Flexibility maximisation | `PowsyblFlexibility.flexibility_max` | the flexibility solver |
+| Copper-plate bound / pre-filter | `PowsyblFlexibility.copperplate_bound` | the copper-plate feasibility interval |
+
+The factoring lines up almost one-to-one, which is good evidence the split is the right one.
+
+## Model structure (three levels, four states)
+
+Each device carries one sub-model **per level**:
+
+* **Upper (preventive)** — enforces limits on the *discretized* worst-cases, with a **right-hand-side
+  restriction** `ratio − 1 ≤ slack·bigM − ε_R`. The `ε_R > 0` restriction is what makes the upper
+  bounding conservative-but-feasible (the RRHS idea).
+* **Medial (worst-case)** — the overload `max_{e,s}(P/limit − 1)` modelled with "exactly one
+  violation binary active" (`Σ vio = 1`). This is exactly the selection-binary pattern in
+  `PowsyblWorstCase._relaxed_medial`.
+* **Lower (corrective)** — minimise the max overload ratio (`PowsyblWorstCase._corrective_response`).
+
+The **four states** are `nominal / base(N) / contingency(N-1) / corrective(N-1/c)`, each indexed by
+a discretization point. A **coupling** step feeds worst-cases from the medial up into the outer
+discretization and corrective responses from the lower level into the medial — the bidirectional
+Falk–Hoffman/Blankenship exchange.
+
+Two modelling details worth adopting in our code:
+
+* **Asymmetric per-direction limits** (`P_limit_lower` / `P_limit_upper`) — a branch can have
+  different ratings per flow direction. We currently use a symmetric `|P|/lim`.
+* **Border-inclusive activation** — an activation threshold expressed as `Σ mode ≤ 1` (a state on
+  the boundary counts as *both* active and inactive) rather than a strict `= 1`, avoiding an
+  ε-discontinuity that our strict threshold introduces.
+
+## Full PST automaton — two resolutions of the same problem
+
+Both implementations model the same automaton: a phase-shifter that **activates** when its flow
+crosses `P_act`, **regulates** toward a target, **trips** on over-current (`|P| ≥ P_lim`) and
+**propagates** the trip forward (`N → N-1 → N-1/c`). Both hit the same difficulty: when a device is
+open its buses decouple, so its *would-be* natural flow can be arranged to exceed the rating and
+"justify" a **spurious trip** — a state that is only locally consistent.
+
+The two resolutions differ:
+
+| | Reference | This repo |
+|---|---|---|
+| Where resolved | across the discretization loop | within each solve |
+| Mechanism | fix the automaton mode/trip **pattern per discretization point** from the lower-level solution; in the medial, `mode_violation` binaries detect when that fixed pattern is inconsistent with the newly-chosen worst-case; a point may be **ignored only if it genuinely violates** (`ignore_disc ≤ Σ device_violation`) | a deterministic **connected-reference flow** `P_ref` (a second DC solve with every full-PST forced connected at α⁰); the trip is pinned to `|P_ref| ≥ P_lim`, which is a determined function of the injection, so no spurious trip can form in either the medial or the lower level |
+| Medial linearity | linear (trip is a fixed parameter) | MILP (trip is a variable) |
+| Generality | handles the implicit automaton response fully | assumes a single acting device per corridor (no within-state cascade between several full-PSTs) |
+| Cost | more machinery, more discretization points | self-contained, simpler |
+
+Our reference-flow route is a **modelling** fix; theirs is an **algorithmic** (discretization) fix.
+They should agree on any single-full-PST case; a shared fixture cross-check is a good validation
+task. The reference route becomes necessary if/when we support several interacting full-PSTs whose
+trips cascade within one state.
+
+## Copper-plate
+
+Dropping every branch **limit** (keeping power balance and generator capacity) collapses the grid to
+a single bus. The largest region still balanceable by the responding generation is an **upper bound**
+`δ_cp ≥ δ*` (removing constraints only enlarges the manageable region) and a **fast feasibility
+pre-filter** (copper-plate infeasibility ⇒ network infeasibility, no MILP needed). The reference
+computes this as an **exchange interval**: the min/max exchange achievable with the controllable
+uncertain injections at zero, solved in both directions and intersected, then widened by the
+generator-sum bound. Our `copperplate_bound` implements the scaled-hyperbox equivalent (an interval
+check on `Σy` against up/down regulating headroom); the exchange version is the next slice.
+
+## Gaps / roadmap (highest leverage first)
+
+1. **Exchange (power-transfer) parameterization** — the reference's *primary* objective is
+   max-exchange, not hyperbox-δ. Add a directional region `y = y⁰ + δ·d` and the matching
+   copper-plate exchange interval so results are directly comparable.
+2. **Outer ULP discretization + RRHS upper-bounding** — we have the oracle (medial↔lower) solid;
+   the outer discretization with the RRHS restriction (`SemiInfinite.solve_rrhs` / `solve_esip_bnf`)
+   is what turns it into the full flexibility solver. The `ignore_disc` machinery is specifically the
+   piece that lets the full-PST automaton compose inside that outer loop.
+3. **Richer load balancing** — merit-order (generators hit bounds in a fixed order) and **emergency
+   generators** (inject only when all others are capped), on top of our participation + saturation.
+4. **`discrete_shifter`** (discrete-tap PST) and a **corrective line automaton** as device types.
+5. **Asymmetric per-direction limits** and **border-inclusive activation** (cheap, do alongside the
+   above).
