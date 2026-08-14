@@ -145,10 +145,26 @@ appears in the solver loop):
 `cpf` and `wcgen` (and `aux`) are all *derived from* the medial formulation — each is the medial
 with a modified objective and an extra constraint — which is why they share its variables.
 
-Separately, the solve runs a **lower-bounding and an upper-bounding procedure in parallel
-threads**, differing in the RHS restriction (`ε_R = 0` for the lower bound, `ε_R > 0` for the
-upper). Each thread instantiates the canonical medial; that is two *instances* of one program,
-not two distinct programs.
+### The AUX ∥ MLP race
+
+The parallelism that matters algorithmically is between **`aux` and the canonical `mlp`**: both
+are launched concurrently, and *whichever first proves a result that terminates the step aborts
+the other*. The cheap restricted heuristic and the exact medial race, and the step costs the
+**minimum** of the two rather than the exact solve every time — the heuristic often settles the
+iteration, and when it cannot, the exact medial is already running rather than starting late.
+
+There is a second, outer layer of threading — a lower-bounding and an upper-bounding procedure
+differing in the RHS restriction (`ε_R = 0` vs `ε_R > 0`) — but each of those instantiates the
+same canonical medial, so it is two *instances* of one program, not two distinct programs.
+
+This race is worth reproducing before any joint preventive optimisation: it is a pure
+wall-clock win that does not change the answer.
+
+### Binaries
+
+`grid-screen` (the main solver, driving the grid-solver class), plus `validate_model`,
+`calculate_copper_plate_interval`, `obbt` and `filter` — the last two confirming that bound
+tightening and monitored-line screening are standalone prior steps.
 
 **The outer (preventive) optimisation is currently disabled.** The specialised flexibility solver
 — the subclass that would optimise the preventive actions `x` together with `δ`, with the dual
