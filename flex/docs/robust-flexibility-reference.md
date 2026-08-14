@@ -184,10 +184,30 @@ worst limit violation at discretization point `d` (plus its ignore term), `E` fo
 * **`wcgen`** drops that balance term and instead *constrains* the exchange to the range, so it is
   the **pure worst-violation search** — the same quantity as our oracle's `φ`.
 * **`aux`** is the odd one out and is genuinely a different algorithm: it **minimises the
-  exchange** subject to a violation of at least the restriction `ε_R` being forced at every point.
-  That is the restriction-of-the-right-hand-side scheme — solve a *restricted* problem to obtain a
-  valid **upper** bound on the safe exchange. Its two knobs are an initial restriction and a
+  exchange** subject to a violation of at least the restriction `ε_R` being forced at every point —
+  the restriction-of-the-right-hand-side scheme. Its two knobs are an initial restriction and a
   reduction factor, matching `solve_rrhs`'s `epsilon` and `beta`.
+
+### The bound bookkeeping (settled from the solver sources)
+
+The scheme **minimises internally**, which flips the sign of the objective and swaps which bound is
+which — the source says so in as many words. With that fixed, the rules are:
+
+* the **relaxation** branch (`ε_R = 0`) records its objective as a valid bound **unconditionally**,
+  whether or not the point turns out feasible for the full problem;
+* the **restricted** branch (`ε_R > 0`) stores an incumbent **only after** the candidate passes the
+  actual lower-level check, and only when it improves on the best so far (the incumbent is
+  monotone);
+* `ε_R` is divided by the reduction factor in **two** situations: when the restricted problem comes
+  back infeasible (the restriction was too aggressive) *and* when it succeeds (tighten it for a
+  better incumbent next round);
+* the relaxation and the restriction each carry **their own discretization**, and a point is added
+  only when its lower-level solution actually produces a cut.
+
+Reading this settled a defect on our side: `restriction` had drifted to mean opposite things in our
+two formulations — tightening the security test reports a *smaller* (conservative) frontier, while
+demanding a larger violation in the minimum-exchange program reported a *larger* (optimistic) one.
+It is now a security margin in both, so tightening always moves the reported frontier down.
 
 The decisive structural fact: **`mlp` and `wcgen` are solved by the same call** —
 `minmax_solver.solve(⟨max program⟩, llp, disc)` — with only the maximisation program swapped.
