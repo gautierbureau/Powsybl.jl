@@ -44,24 +44,41 @@ export GridModel, WorstCaseSolution, worst_case_oracle, is_secure
 
 # ---------------------------------------------------------------------------
 # Branches (lines, PSTs, HVDC) and generators
+#
+# Each device is its own type carrying only its own data, and its DC flow equation is a method
+# of `_flow!` selected by dispatch — the equation is written once and instantiated per state.
+# All branches share `id`, `bus1`, `bus2`.
 # ---------------------------------------------------------------------------
-struct Branch
+abstract type Branch end
+
+"A plain line (or non-regulating transformer): `P = h·Δθ`."
+struct Line <: Branch
     id::String
     bus1::String
     bus2::String
-    kind::Symbol           # :line | :pst | :hvdc
-    h::Float64             # DC susceptance V²/x (line, pst)
-    alpha0::Float64        # pst preventive angle (rad)
-    alpha_min::Float64
-    alpha_max::Float64
-    p_zero::Float64        # hvdc set point (MW)
-    k::Float64             # hvdc AC-emulation coefficient (MW/rad)
-    p_lim::Float64         # hvdc clamp limit (Inf ⇒ none)
+    h::Float64             # DC susceptance V²/x
 end
 
-_line(id, b1, b2, h) = Branch(id, b1, b2, :line, h, 0.0, 0.0, 0.0, 0.0, 0.0, Inf)
-_pst(id, b1, b2, h, a0, amin, amax) = Branch(id, b1, b2, :pst, h, a0, amin, amax, 0.0, 0.0, Inf)
-_hvdc(id, b1, b2, k, pz, plim) = Branch(id, b1, b2, :hvdc, 0.0, 0.0, 0.0, 0.0, pz, k, plim)
+"A phase-shifting transformer: `P = h·(Δθ + α)`, `α` preventive or corrective."
+struct Pst <: Branch
+    id::String
+    bus1::String
+    bus2::String
+    h::Float64
+    alpha0::Float64        # preventive angle (rad)
+    alpha_min::Float64
+    alpha_max::Float64
+end
+
+"An HVDC link in AC emulation: `P = clamp(P⁰ + K·Δθ, ±P^lim)`."
+struct Hvdc <: Branch
+    id::String
+    bus1::String
+    bus2::String
+    p_zero::Float64        # set point (MW)
+    k::Float64             # AC-emulation coefficient (MW/rad)
+    p_lim::Float64         # clamp limit (Inf ⇒ none)
+end
 
 struct Gen
     id::String
@@ -121,17 +138,17 @@ function GridModel(network; slack::Union{Nothing,String} = nothing)
     branches = Branch[]
     for i in _rows(lines)
         v2 = nominal_v[lines[i, :voltage_level2_id]]
-        push!(branches, _line(lines[i, :id], lines[i, :bus1_id], lines[i, :bus2_id], v2^2 / lines[i, :x]))
+        push!(branches, Line(lines[i, :id], lines[i, :bus1_id], lines[i, :bus2_id], v2^2 / lines[i, :x]))
     end
     for i in _rows(tfos)
         id = tfos[i, :id]; v2 = nominal_v[tfos[i, :voltage_level2_id]]
         h = v2^2 / tfos[i, :x_at_current_tap]
         if id in pst_ids
             a = get(alphas, id, Float64[0.0])
-            push!(branches, _pst(id, tfos[i, :bus1_id], tfos[i, :bus2_id], h, get(alpha0, id, 0.0),
-                                 minimum(a), maximum(a)))
+            push!(branches, Pst(id, tfos[i, :bus1_id], tfos[i, :bus2_id], h, get(alpha0, id, 0.0),
+                                minimum(a), maximum(a)))
         else
-            push!(branches, _line(id, tfos[i, :bus1_id], tfos[i, :bus2_id], h))
+            push!(branches, Line(id, tfos[i, :bus1_id], tfos[i, :bus2_id], h))
         end
     end
 
@@ -139,7 +156,7 @@ function GridModel(network; slack::Union{Nothing,String} = nothing)
     return GridModel(bus_ids, sl, generators, load_by_bus, branches)
 end
 
-_pst_alpha0(gm::GridModel) = Dict(b.id => b.alpha0 for b in gm.branches if b.kind === :pst)
+_pst_alpha0(gm::GridModel) = Dict(b.id => b.alpha0 for b in gm.branches if b isa Pst)
 _nominal_injection(gm::GridModel) =
     Dict(n => sum((g.p0 for g in gm.generators if g.bus == n); init = 0.0) -
               get(gm.load_by_bus, n, 0.0) for n in gm.buses)
@@ -169,34 +186,59 @@ end
 is_secure(sol::WorstCaseSolution) = sol.secure
 
 # ---------------------------------------------------------------------------
-# States
+# The four operating states
+#
+# Each state is a type, so anything that varies by state (per-state limits, the PST automaton's
+# behaviour) is expressed as methods dispatching on it rather than as a branch on a tag. The DC
+# equations themselves are written once and instantiated per state by `_build_program!`.
 # ---------------------------------------------------------------------------
-struct State
-    name::String
-    kind::Symbol
-    outage::Union{Nothing,String}
-    uncertainty::Bool
-    corrective_for::Union{Nothing,String}
+abstract type State end
+
+"State 0 — nominal: forecast injections, intact grid, preventive control."
+struct NominalState <: State end
+"State N — base: uncertain injections, intact grid, preventive control."
+struct BaseState <: State end
+"State N-1 — post-contingency: uncertain injections, outage, no correction yet."
+struct ContingencyState <: State
+    outage::String
+end
+"State N-1/c — post-corrective: uncertain injections, outage, corrective control."
+struct CorrectiveState <: State
+    outage::String
 end
 
+statename(::NominalState) = "nominal"
+statename(::BaseState) = "N"
+statename(s::ContingencyState) = "N-1[$(s.outage)]"
+statename(s::CorrectiveState) = "N-1/c[$(s.outage)]"
+
+outage(::Union{NominalState,BaseState}) = nothing
+outage(s::Union{ContingencyState,CorrectiveState}) = s.outage
+
+# Only the nominal state uses the forecast (certain) injection.
+has_uncertainty(::NominalState) = false
+has_uncertainty(::State) = true
+
+# Corrective control acts only post-corrective, as per-contingency recourse.
+corrective_for(s::CorrectiveState) = s.outage
+corrective_for(::State) = nothing
+
 function _states(contingencies)
-    out = State[State("nominal", :nominal, nothing, false, nothing),
-                State("N", :base, nothing, true, nothing)]
+    out = State[NominalState(), BaseState()]
     for c in contingencies
-        push!(out, State("N-1[$c]", :contingency, c, true, nothing))
-        push!(out, State("N-1/c[$c]", :corrective, c, true, c))
+        push!(out, ContingencyState(c))
+        push!(out, CorrectiveState(c))
     end
     return out
 end
 
 _active(branches, out) = out === nothing ? branches : filter(b -> b.id != out, branches)
 
-_limit(v::Number, kind) = v
-function _limit(v::NamedTuple, kind)
-    kind === :contingency && haskey(v, :contingency) && return v.contingency
-    kind === :corrective && haskey(v, :corrective) && return v.corrective
-    return v.base
-end
+# A monitored limit is either one number for every state, or a per-state NamedTuple.
+_limit(v::Number, ::State) = v
+_limit(v::NamedTuple, s::ContingencyState) = get(v, :contingency, v.base)
+_limit(v::NamedTuple, s::CorrectiveState) = get(v, :corrective, v.base)
+_limit(v::NamedTuple, ::State) = v.base
 
 # ---------------------------------------------------------------------------
 # Injection model (secondary frequency response / single slack)
@@ -239,21 +281,55 @@ function _injection_model!(model, gm, participation, v, balance_M)
 end
 
 # ---------------------------------------------------------------------------
-# Per-branch DC flow, including the integer-mode devices.
-#   line:  P = h·Δθ
-#   hvdc:  P = clamp(P⁰ + K·Δθ, ±P^lim)                                   (3-mode disjunction)
-#   pst :  regulate  P = h·(Δθ + α),  |P| ≤ P^lim   OR   trip  P = 0      (disconnection disjunction)
-# `open` is `nothing` (no switching), a `Bool` (fixed candidate) or a binary `VariableRef`.
+# Per-branch DC flow — one method per device type, selected by dispatch.
+#   Line:  P = h·Δθ
+#   Hvdc:  P = clamp(P⁰ + K·Δθ, ±P^lim)                                  (3-mode disjunction)
+#   Pst :  regulate P = h·(Δθ + α), |P| ≤ P^lim  OR  trip P = 0          (disconnection disjunction)
+#          — or, where `pst_model` gives its parameters, the full protection automaton.
 # ---------------------------------------------------------------------------
-function _branch_flow!(model, br, θ, angle, open, plim, M)
-    Δθ = θ[br.bus1] - θ[br.bus2]
-    if br.kind === :line
-        p = @variable(model); @constraint(model, p == br.h * Δθ); return p
-    elseif br.kind === :hvdc
-        return _clamp!(model, br.p_zero + br.k * Δθ, -br.p_lim, br.p_lim, M)
-    end
-    # PST
-    nat = br.h * (Δθ + angle)
+"""
+    StateBuilder
+
+Everything one state needs in order to instantiate the shared equations: the state itself, how
+corrective control enters it (`angle_of`, `open_of`, `plim_of`), its injection, and a `memo`
+carrying the PST automaton's couplings *across* states (a trip in N is inherited in N-1, and
+again post-corrective).
+"""
+struct StateBuilder
+    gm::GridModel
+    st::State
+    angle_of::Function
+    open_of::Function
+    plim_of::Function
+    pst_model::AbstractDict
+    inj::AbstractDict
+    drop_slack::Bool
+    M::Float64
+    tag::String
+    memo::Dict{Any,Any}
+end
+
+_dθ(br::Branch, θ) = θ[br.bus1] - θ[br.bus2]
+_is_automaton(sb::StateBuilder, br::Branch) = br isa Pst && haskey(sb.pst_model, br.id)
+_pref(sb::StateBuilder, br::Branch) = sb.memo[(:pref, br.id)]
+
+function _flow!(model, br::Line, θ, sb::StateBuilder)
+    p = @variable(model); @constraint(model, p == br.h * _dθ(br, θ)); return p
+end
+
+_flow!(model, br::Hvdc, θ, sb::StateBuilder) =
+    _clamp!(model, br.p_zero + br.k * _dθ(br, θ), -br.p_lim, br.p_lim, sb.M)
+
+function _flow!(model, br::Pst, θ, sb::StateBuilder)
+    _is_automaton(sb, br) && return _automaton_flow!(model, br, θ, sb.st, sb, sb.pst_model[br.id])
+    return _switchable_pst_flow!(model, br, θ, sb)
+end
+
+# A PST held at a given angle, optionally switchable: `open` is `nothing` (no switching), a
+# `Bool` (a fixed candidate) or a binary variable.
+function _switchable_pst_flow!(model, br::Pst, θ, sb::StateBuilder)
+    open = sb.open_of(br.id); plim = sb.plim_of(br.id, open); M = sb.M
+    nat = br.h * (_dθ(br, θ) + sb.angle_of(br.id))
     if open === nothing
         p = @variable(model); @constraint(model, p == nat); return p
     elseif open isa Bool
@@ -261,48 +337,55 @@ function _branch_flow!(model, br, θ, angle, open, plim, M)
         p = @variable(model); @constraint(model, p == nat)
         isfinite(plim) && @constraint(model, -plim <= p <= plim)
         return p
-    else                                               # `open` is a binary variable
-        p = @variable(model)
-        @constraint(model, p <= nat + M * open); @constraint(model, p >= nat - M * open)   # closed ⇒ p = nat
-        @constraint(model, p <= M * (1 - open)); @constraint(model, p >= -M * (1 - open))  # open ⇒ p = 0
-        if isfinite(plim)
-            @constraint(model, p <= plim + M * open); @constraint(model, p >= -plim - M * open)
-        end
-        return p
     end
+    p = @variable(model)                               # `open` is a binary variable
+    @constraint(model, p <= nat + M * open); @constraint(model, p >= nat - M * open)   # closed ⇒ p = nat
+    @constraint(model, p <= M * (1 - open)); @constraint(model, p >= -M * (1 - open))  # open ⇒ p = 0
+    if isfinite(plim)
+        @constraint(model, p <= plim + M * open); @constraint(model, p >= -plim - M * open)
+    end
+    return p
 end
 
-function _add_state!(model, gm::GridModel, out, angle_of, open_of, plim_of, inj, drop_slack, M, tag;
-                    pst_model = Dict{String,Any}(), st = nothing, ctx = nothing)
-    active = _active(gm.branches, out)
-    full = Dict(br.id => br for br in active if br.kind === :pst && haskey(pst_model, br.id))
-    pref = isempty(full) ? Dict{String,Any}() :
-           _reference_flows!(model, gm, out, angle_of, open_of, plim_of, pst_model, inj, drop_slack, M, tag)
-    θ = Dict(b => @variable(model, base_name = "θ_$(tag)_$(b)") for b in gm.buses)
-    fix(θ[gm.slack], 0.0; force = true)
-    P = Dict{String,Any}()
-    for br in active
-        if haskey(full, br.id)
-            P[br.id] = _full_pst_flow!(model, br, θ, st, ctx, pst_model[br.id], M, pref[br.id])
-        elseif br.kind === :pst
-            op  = open_of(br.id)
-            P[br.id] = _branch_flow!(model, br, θ, angle_of(br.id), op, plim_of(br.id, op), M)
-        else
-            P[br.id] = _branch_flow!(model, br, θ, 0.0, nothing, Inf, M)
-        end
-    end
-    for n in gm.buses
-        (drop_slack && n == gm.slack) && continue
+# The connected-reference layer flows a full-automaton PST as a plain branch at α⁰; every other
+# device behaves exactly as in the actual layer.
+_reference_flow!(model, br::Branch, θ, sb::StateBuilder) = _flow!(model, br, θ, sb)
+function _reference_flow!(model, br::Pst, θ, sb::StateBuilder)
+    _is_automaton(sb, br) || return _switchable_pst_flow!(model, br, θ, sb)
+    p = @variable(model); @constraint(model, p == br.h * (_dθ(br, θ) + br.alpha0)); return p
+end
+
+# One DC layer: bus angles, a flow per active branch, nodal balance. Written once, and reused
+# for both the actual state and its connected reference.
+function _dc_layer!(model, sb::StateBuilder, tag, flow)
+    active = _active(sb.gm.branches, outage(sb.st))
+    θ = Dict(b => @variable(model, base_name = "θ_$(tag)_$(b)") for b in sb.gm.buses)
+    fix(θ[sb.gm.slack], 0.0; force = true)
+    P = Dict{String,Any}(br.id => flow(br, θ) for br in active)
+    for n in sb.gm.buses
+        (sb.drop_slack && n == sb.gm.slack) && continue
         out_flow = sum(P[br.id] for br in active if br.bus1 == n; init = AffExpr(0.0))
         in_flow  = sum(P[br.id] for br in active if br.bus2 == n; init = AffExpr(0.0))
-        @constraint(model, out_flow - in_flow == inj[n])
+        @constraint(model, out_flow - in_flow == sb.inj[n])
     end
     return P
 end
 
+function _add_state!(model, sb::StateBuilder)
+    full = [br for br in _active(sb.gm.branches, outage(sb.st)) if _is_automaton(sb, br)]
+    if !isempty(full)
+        pref = _dc_layer!(model, sb, "ref_" * sb.tag, (br, θ) -> _reference_flow!(model, br, θ, sb))
+        for br in full
+            sb.memo[(:pref, br.id)] = pref[br.id]
+        end
+    end
+    return _dc_layer!(model, sb, sb.tag, (br, θ) -> _flow!(model, br, θ, sb))
+end
+
 # ---------------------------------------------------------------------------
-# Full PST automaton (Aachen §2.1.6): over-current protection with N→N-1→N-1/c trip
-# propagation, an activation threshold, and target regulation.
+# Full PST automaton: over-current protection with N→N-1→N-1/c trip propagation, an activation
+# threshold, and target regulation. There is one `_automaton_flow!` method per state, so each
+# state's behaviour is its own equation rather than a branch inside a single routine.
 # ---------------------------------------------------------------------------
 # Inactive branch: P = h·(Δθ + α⁰) within the rating, else trip. The over-current test is
 # justified against the *connected-reference* flow `p_ref` (a determined quantity), not the
@@ -327,8 +410,8 @@ function _inactive_flow!(model, br, Δθ, plim, M, p_ref; conn_max = nothing)
     return P, conn
 end
 
-# Active branch: regulate toward ±P^tar within the angle range (median of clamps), trip on
-# over-current. `reg` reproduces Aachen Eq. 5 modes 4–10 exactly.
+# Active branch: regulate toward ±P^tar within the angle range (the median of the two clamps),
+# and trip on over-current.
 function _active_flow!(model, br, Δθ, plim, ptar, M, p_ref; conn_max = nothing)
     lo = br.h * (Δθ + br.alpha_min); hi = br.h * (Δθ + br.alpha_max); nat0 = br.h * (Δθ + br.alpha0)
     reg = _clamp!(model, _clamp!(model, nat0, -ptar, ptar, M), lo, hi, M)
@@ -349,49 +432,34 @@ function _active_flow!(model, br, Δθ, plim, ptar, M, p_ref; conn_max = nothing
     return P, conn
 end
 
-# Connected-reference flow: a second DC solve of the same state with every full-PST forced
-# connected at α⁰ (a plain branch). Having no disconnection binaries, the reference flow of each
-# full-PST is a *determined* function of the injection (and the free correctives), so the
-# over-current test justified against it cannot be gamed by a spurious disconnected equilibrium.
-# The trip decision is thereby pinned identically in the medial (max) and the response (min).
-function _reference_flows!(model, gm, out, angle_of, open_of, plim_of, pst_model, inj, drop_slack, M, tag)
-    active = _active(gm.branches, out)
-    θ = Dict(b => @variable(model, base_name = "θref_$(tag)_$(b)") for b in gm.buses)
-    fix(θ[gm.slack], 0.0; force = true)
-    P = Dict{String,Any}(); Pref = Dict{String,Any}()
-    for br in active
-        if br.kind === :pst && haskey(pst_model, br.id)
-            p = @variable(model); @constraint(model, p == br.h * (θ[br.bus1] - θ[br.bus2] + br.alpha0))
-            P[br.id] = p; Pref[br.id] = p
-        elseif br.kind === :pst
-            op = open_of(br.id)
-            P[br.id] = _branch_flow!(model, br, θ, angle_of(br.id), op, plim_of(br.id, op), M)
-        else
-            P[br.id] = _branch_flow!(model, br, θ, 0.0, nothing, Inf, M)
-        end
-    end
-    for n in gm.buses
-        (drop_slack && n == gm.slack) && continue
-        out_flow = sum(P[br.id] for br in active if br.bus1 == n; init = AffExpr(0.0))
-        in_flow  = sum(P[br.id] for br in active if br.bus2 == n; init = AffExpr(0.0))
-        @constraint(model, out_flow - in_flow == inj[n])
-    end
-    return Pref
+# Nominal: the device is inactive at α⁰; it may still trip on over-current.
+function _automaton_flow!(model, br::Pst, θ, ::NominalState, sb::StateBuilder, fp)
+    P, _ = _inactive_flow!(model, br, _dθ(br, θ), fp.p_lim, sb.M, _pref(sb, br))
+    return P
 end
 
-function _full_pst_flow!(model, br, θ, st::State, ctx, fp, M, p_ref)
-    Δθ = θ[br.bus1] - θ[br.bus2]
-    if st.kind === :nominal
-        P, _ = _inactive_flow!(model, br, Δθ, fp.p_lim, M, p_ref); return P
-    elseif st.kind === :base
-        P, conn = _inactive_flow!(model, br, Δθ, fp.p_lim, M, p_ref)
-        ctx[(br.id, :conn_N)] = conn; return P
-    elseif st.kind === :contingency
-        P, conn = _inactive_flow!(model, br, Δθ, fp.p_lim, M, p_ref; conn_max = ctx[(br.id, :conn_N)])
-        ctx[(br.id, st.outage, :conn_N1)] = conn; ctx[(br.id, st.outage, :P_N1)] = P; return P
-    end
-    # post-corrective (N-1/c): activation from |P^{N-1}| ≥ P^act, then active or inactive.
-    conn_N1 = ctx[(br.id, st.corrective_for, :conn_N1)]; P_N1 = ctx[(br.id, st.corrective_for, :P_N1)]
+# Base (N): as nominal, but a trip here is inherited by every later state.
+function _automaton_flow!(model, br::Pst, θ, ::BaseState, sb::StateBuilder, fp)
+    P, conn = _inactive_flow!(model, br, _dθ(br, θ), fp.p_lim, sb.M, _pref(sb, br))
+    sb.memo[(:conn_N, br.id)] = conn
+    return P
+end
+
+# Post-contingency (N-1): still inactive at α⁰, cannot reconnect if it tripped in N.
+function _automaton_flow!(model, br::Pst, θ, st::ContingencyState, sb::StateBuilder, fp)
+    P, conn = _inactive_flow!(model, br, _dθ(br, θ), fp.p_lim, sb.M, _pref(sb, br);
+                              conn_max = sb.memo[(:conn_N, br.id)])
+    sb.memo[(:conn_N1, br.id, st.outage)] = conn
+    sb.memo[(:P_N1, br.id, st.outage)] = P
+    return P
+end
+
+# Post-corrective (N-1/c): the device activates once |P^{N-1}| ≥ P^act and then regulates toward
+# ±P^tar; otherwise it stays inactive at α⁰. Either way a trip inherited from N-1 keeps it open.
+function _automaton_flow!(model, br::Pst, θ, st::CorrectiveState, sb::StateBuilder, fp)
+    M = sb.M; Δθ = _dθ(br, θ); p_ref = _pref(sb, br)
+    conn_N1 = sb.memo[(:conn_N1, br.id, st.outage)]
+    P_N1 = sb.memo[(:P_N1, br.id, st.outage)]
     P_ia, _ = _inactive_flow!(model, br, Δθ, fp.p_lim, M, p_ref; conn_max = conn_N1)
     P_a, _  = _active_flow!(model, br, Δθ, fp.p_lim, fp.p_tar, M, p_ref; conn_max = conn_N1)
     act = @variable(model, binary = true); sgn = @variable(model, binary = true)
@@ -404,31 +472,53 @@ function _full_pst_flow!(model, br, θ, st::State, ctx, fp, M, p_ref)
     return P
 end
 
-function _overloads(P, monitored, kind)
+function _overloads(P, monitored, st::State)
     out = Any[]
     for (id, limspec) in monitored
         haskey(P, id) || continue
-        lim = _limit(limspec, kind)
+        lim = _limit(limspec, st)
         push!(out, P[id] / lim - 1)
         push!(out, -P[id] / lim - 1)
     end
     return out
 end
 
-function _angle_of(gm, st::State, correctives, corr)
-    a0 = _pst_alpha0(gm)
-    return function (pst_id)
-        if st.kind === :corrective && pst_id in correctives
-            c = corr(pst_id)
-            c === nothing || return c
-        end
-        return get(a0, pst_id, 0.0)
-    end
-end
-
 # PST over-current limit applies only where a disconnection mode is available (corrective states
 # of switchable PSTs) — elsewhere the PST is at α⁰ and unrestricted (temporary rating assumed).
 _plim_of(pst_limits) = (pst_id, open) -> (open === nothing ? Inf : get(pst_limits, pst_id, Inf))
+
+# ---------------------------------------------------------------------------
+# The multi-state system, instantiated once per program.
+#
+# Both programs below build the *same* four-state DC system. They differ only in where the
+# corrective controls come from (free variables in the response problem, a fixed candidate in
+# the relaxed medial) and in how each overload enters the objective — so those are the two
+# callbacks, and the state loop itself is written once.
+# ---------------------------------------------------------------------------
+function _build_program!(model, gm, states, monitored, correctives, switchable, pst_limits,
+                         pst_model, inj_unc, inj_nom, drop_slack, M, tag_prefix,
+                         corr_angle, corr_open, on_overload)
+    a0 = _pst_alpha0(gm)
+    plim_of = _plim_of(pst_limits)
+    memo = Dict{Any,Any}()
+    for st in states
+        cf = corrective_for(st)
+        angle_of = function (pid)
+            if cf !== nothing && pid in correctives
+                c = corr_angle(pid, cf)
+                c === nothing || return c
+            end
+            return get(a0, pid, 0.0)
+        end
+        open_of = pid -> (cf !== nothing && pid in switchable ? corr_open(pid, cf) : nothing)
+        sb = StateBuilder(gm, st, angle_of, open_of, plim_of, pst_model,
+                          has_uncertainty(st) ? inj_unc : inj_nom, drop_slack, M,
+                          "$(tag_prefix)$(statename(st))", memo)
+        for o in _overloads(_add_state!(model, sb), monitored, st)
+            on_overload(o)
+        end
+    end
+end
 
 # ---------------------------------------------------------------------------
 # Corrective-response problem (LLP)
@@ -437,7 +527,7 @@ function _corrective_response(gm, states, monitored, correctives, switchable, co
                               participation, pst_limits, pst_model, vstar, opt, silent, bigM, balance_M)
     model = Model(opt); silent && set_silent(model)
     inj_unc, inj_nom, drop_slack = _injection_model!(model, gm, participation, vstar, balance_M)
-    ranges = Dict(b.id => (b.alpha_min, b.alpha_max) for b in gm.branches if b.kind === :pst)
+    ranges = Dict(b.id => (b.alpha_min, b.alpha_max) for b in gm.branches if b isa Pst)
     α = Dict{Tuple{String,String},VariableRef}()
     op = Dict{Tuple{String,String},VariableRef}()
     for c in contingencies, pid in correctives
@@ -446,20 +536,13 @@ function _corrective_response(gm, states, monitored, correctives, switchable, co
         α[(pid, c)] = a
         pid in switchable && (op[(pid, c)] = @variable(model, binary = true, base_name = "open_$(pid)_$(c)"))
     end
-    plim_of = _plim_of(pst_limits)
-    ctx = Dict{Any,Any}()
     @variable(model, η)
-    for st in states
-        corr_a = pid -> (st.corrective_for === nothing ? nothing : get(α, (pid, st.corrective_for), nothing))
-        open_of = pid -> (st.kind === :corrective && pid in switchable ?
-                          get(op, (pid, st.corrective_for), nothing) : nothing)
-        P = _add_state!(model, gm, st.outage, _angle_of(gm, st, correctives, corr_a), open_of,
-                        plim_of, st.uncertainty ? inj_unc : inj_nom, drop_slack, bigM, st.name;
-                        pst_model = pst_model, st = st, ctx = ctx)
-        for o in _overloads(P, monitored, st.kind)
-            @constraint(model, η >= o)
-        end
-    end
+    # correctives are free variables here; every overload is an epigraph lower bound on η
+    _build_program!(model, gm, states, monitored, correctives, switchable, pst_limits, pst_model,
+                    inj_unc, inj_nom, drop_slack, bigM, "",
+                    (pid, c) -> get(α, (pid, c), nothing),
+                    (pid, c) -> get(op, (pid, c), nothing),
+                    o -> @constraint(model, η >= o))
     @objective(model, Min, η)
     optimize!(model)
     ac = Dict((pid, c) => (alpha = value(α[(pid, c)]),
@@ -480,24 +563,19 @@ function _relaxed_medial(gm, states, monitored, uncertain, correctives, switchab
         v[n] = vn
     end
     inj_unc, inj_nom, drop_slack = _injection_model!(model, gm, participation, v, balance_M)
-    plim_of = _plim_of(pst_limits)
     @variable(model, η)
+    # each candidate corrective response is a fixed menu entry; a binary picks the branch/state
+    # that binds, so η is the worst overload the uncertainty can force against that response
     for (j, cand) in enumerate(candidates)
         sel = VariableRef[]
-        ctx = Dict{Any,Any}()
-        for st in states
-            corr_a = pid -> (st.corrective_for === nothing ? nothing :
-                             (haskey(cand, (pid, st.corrective_for)) ? cand[(pid, st.corrective_for)].alpha : nothing))
-            open_of = pid -> (st.kind === :corrective && pid in switchable &&
-                              haskey(cand, (pid, st.corrective_for)) ? cand[(pid, st.corrective_for)].open : nothing)
-            P = _add_state!(model, gm, st.outage, _angle_of(gm, st, correctives, corr_a), open_of,
-                            plim_of, st.uncertainty ? inj_unc : inj_nom, drop_slack, bigM, "c$(j)_$(st.name)";
-                            pst_model = pst_model, st = st, ctx = ctx)
-            for o in _overloads(P, monitored, st.kind)
-                b = @variable(model, binary = true); push!(sel, b)
-                @constraint(model, η <= o + bigM * (1 - b))
-            end
-        end
+        _build_program!(model, gm, states, monitored, correctives, switchable, pst_limits, pst_model,
+                        inj_unc, inj_nom, drop_slack, bigM, "c$(j)_",
+                        (pid, c) -> (haskey(cand, (pid, c)) ? cand[(pid, c)].alpha : nothing),
+                        (pid, c) -> (haskey(cand, (pid, c)) ? cand[(pid, c)].open : nothing),
+                        function (o)
+                            b = @variable(model, binary = true); push!(sel, b)
+                            @constraint(model, η <= o + bigM * (1 - b))
+                        end)
         @constraint(model, sum(sel) == 1)
     end
     @objective(model, Max, η)
@@ -544,7 +622,7 @@ function worst_case_oracle(network;
                            bigM = 1e4, balance_bigM = 1e5, silent = true)
     gm = GridModel(network; slack = slack)
     for h in hvdc
-        push!(gm.branches, _hvdc(h.id, h.bus1, h.bus2, h.k, h.p_zero, h.p_lim))
+        push!(gm.branches, Hvdc(h.id, h.bus1, h.bus2, h.p_zero, h.k, h.p_lim))
     end
     conts = collect(String, contingencies)
     correctives = collect(String, correctives)
@@ -562,7 +640,7 @@ function worst_case_oracle(network;
     # When the full-PST automaton is the acting device and there is no *free* corrective to
     # discretize, the PST is part of the grid model and has no discretionary control. Its trip is
     # pinned deterministically by the connected-reference over-current test (see
-    # `_reference_flows!`), so the relaxed-medial (max over uncertainty) and the corrective-response
+    # `_reference_flow!`), so the relaxed-medial (max over uncertainty) and the corrective-response
     # (physical evaluation) agree: a single pass suffices and the reported `φ` is the response value.
     if isempty(correctives) && isempty(switch)
         ub, vstar = _relaxed_medial(gm, states, monitored, uncertain, correctives, switch, conts,

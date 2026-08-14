@@ -62,7 +62,7 @@ const N1_OVERLOAD = 200.0 * 500 / 700 / 110 - 1     # ≈ 0.2987
     gm = W.GridModel(build_ext())
     ids = Dict(b.id => b for b in gm.branches)
     @test Set(keys(ids)) == Set(["L12a", "L1_2a", "L2b_3", "L_B", "PST_T"])
-    @test ids["PST_T"].kind === :pst
+    @test ids["PST_T"] isa W.Pst
     @test ids["PST_T"].alpha0 ≈ 0.0 atol = 1e-9         # neutral tap ⇒ preventive angle 0
     @test rad2deg(ids["PST_T"].alpha_max) ≈ 30.0 atol = 1e-6
     @test ids["L_B"].h ≈ 300.0
