@@ -5,8 +5,11 @@
 # SPDX-License-Identifier: MPL-2.0
 
 using PowsyblFlexibility
+using PowsyblWorstCase
 using Powsybl
 using Test
+
+const W = PowsyblWorstCase
 
 const NET = Powsybl.Network
 Powsybl.LibPowsybl.set_config_read(false)
@@ -118,6 +121,25 @@ end
                          participation = Dict("G1" => 1.0, "G2" => 1.0), emax_cap = 400.0, tol = 0.05)
     @test slack.emax ≈ 50.0 atol = 0.3
     @test part.emax ≈ 100.0 atol = 0.5           # G2 covers half the import locally
+end
+
+@testset "max_exchange: a restriction gives a conservative (achievable) transfer" begin
+    # Requiring a margin instead of bare security can only shrink the answer, and the restricted
+    # value is guaranteed achievable — it still passes the *exact* test.
+    box = Dict("VL2_0" => (-1000.0, 0.0))
+    mon = Dict("L12" => 150.0)
+    exact = max_exchange(build_corridor(; g1max = 300.0); zone = ["VL2_0"], box = box,
+                         monitored = mon, tol = 0.02)
+    restr = max_exchange(build_corridor(; g1max = 300.0); zone = ["VL2_0"], box = box,
+                         monitored = mon, tol = 0.02, restriction = 0.1)
+    @test restr.emax < exact.emax                 # a margin costs transfer
+    @test restr.emax > 0.0
+    # the conservative answer really is securable: re-check it with the exact test
+    check = W.worst_case_oracle(build_corridor(; g1max = 300.0); uncertain = box, monitored = mon,
+                exchange = (buses = ["VL2_0"], lo = -restr.emax, hi = 0.0))
+    @test W.is_secure(check)
+    # limit ratio 150 MW ⇒ a 10% margin means the flow may reach only 135 MW ⇒ 35 MW of transfer
+    @test restr.emax ≈ 35.0 atol = 0.5
 end
 
 @testset "flexibility_max: insecure at the forecast box ⇒ zero flexibility" begin

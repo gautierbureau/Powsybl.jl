@@ -52,6 +52,10 @@ Here the per-bus `box` bounds how an exchange may be **composed**, while the exc
 is what gets maximised. The security test is monotone in that bound, so the maximum is bisected
 inside the copper-plate interval.
 
+Passing `restriction = ε` requires the grid to be secure *with a margin* rather than merely
+secure. The answer is then **conservative** — guaranteed achievable rather than sitting exactly on
+the frontier — which is what lets a cheap restricted pass stand in for the exact one.
+
 `copperplate_exchange_interval` gives that interval directly: with every branch limit dropped,
 only power balance and generator capacity remain, so an import must be covered by the responding
 generation's **up**-regulating headroom and an export by its **down**-regulating headroom. It
@@ -96,7 +100,9 @@ four-state model with correctives, integer-mode devices, and the full PST automa
 
 Fixed preventive dispatch; both region parameterisations — the **scaled hyperbox** (`δ`) and the
 **power transfer** (`max_exchange`); the **copper-plate** bound and pre-filter for each; and
-**bisection** driving the worst-case oracle. Deferred: racing a restricted upper-bounding
-heuristic against the exact medial (a pure wall-clock win), a worst-case-generation pass to
-certify the reported interval, and jointly optimising the **preventive actions** `x` with the
-metric via the existence-constrained SIP outer loop ([`SemiInfinite`](../sip)).
+**bisection** driving the worst-case oracle, with a **restriction** for conservative answers.
+Deferred: racing the restricted pass against the exact one (a pure wall-clock win, no change to
+the answer), a worst-case-generation pass to certify the reported interval, the medial's
+low-exchange/high-violation balance term (which belongs with an exchange *discretization* loop
+rather than bisection), and jointly optimising the **preventive actions** `x` with the metric via
+the existence-constrained SIP outer loop ([`SemiInfinite`](../sip)).
