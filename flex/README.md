@@ -62,8 +62,11 @@ regimes, the network binding or generation adequacy binding first.
 
 `T(δ)` grows each forecast box `(lo, hi)` outward by `δ · weight` per side. A weight may be a
 scalar (symmetric growth) or a pair `(w_lo, w_hi)` for asymmetric growth — e.g. `(1.0, 0.0)` to
-grow only the load (extra-demand) side. This is the *scaled-hyperbox* parameterisation; the
-*power-transfer* parameterisation (a directional `y = y⁰ + δ·d`) is a later slice.
+grow only the load (extra-demand) side.
+
+Use this when the question is *how far each injection may move independently*; use
+[`max_exchange`](#maximum-exchange-the-power-transfer-parameterisation) when it is *how much
+power a zone may import*, which is the aggregate the reference optimises.
 
 ## Usage
 
