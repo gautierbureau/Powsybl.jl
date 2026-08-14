@@ -86,3 +86,65 @@ end
   result = Powsybl.LoadFlow.run_dc(network, parameters)
   @test size(result.component_results, 1) == 1
 end
+@testset "Test RAO (remedial action optimisation)" begin
+  RAO = Powsybl.RAO
+  network = Powsybl.Network.load("data/rao/rao_network.uct")
+
+  rao = RAO.create()
+  crac = RAO.load_crac(network, "data/rao/rao_crac.json")
+  glsk = RAO.load_glsk("data/rao/rao_glsk.xml")
+  # This CRAC enables loop-flow computation, which needs a GLSK
+  RAO.set_loopflow_glsk(rao, glsk)
+
+  result = RAO.run(rao, network, crac; parameters_file = "data/rao/rao_parameters.json")
+
+  # The optimisation succeeds
+  @test RAO.get_status(result) == RAO.DEFAULT
+
+  # A PST range action was optimised (this CRAC is a PST parade)
+  pst = RAO.get_pst_range_action_results(result)
+  @test "optimized_tap" in names(pst)
+  @test size(pst, 1) >= 1
+
+  # Cost results are reported per optimized instant, including the initial state
+  cost = RAO.get_cost_results(result)
+  @test names(cost) == ["optimized_instant", "functional_cost", "virtual_cost", "cost"]
+  @test "initial" in cost[:, "optimized_instant"]
+
+  # The other result accessors return tabular data without throwing
+  @test size(RAO.get_flow_cnec_results(result), 2) >= 0
+  @test size(RAO.get_range_action_results(result), 2) >= 0
+  @test size(RAO.get_network_action_results(result), 2) >= 0
+end
+
+@testset "Test CRAC introspection" begin
+  RAO = Powsybl.RAO
+  network = Powsybl.Network.load("data/rao/rao_network.uct")
+  crac = RAO.load_crac(network, "data/rao/rao_crac.json")
+
+  # Contingencies and the elements they trip
+  contingencies = RAO.get_contingencies(crac)
+  @test "id" in names(contingencies)
+  @test size(contingencies, 1) == 1
+  @test "network_element_id" in names(RAO.get_contingency_elements(crac))
+
+  # Instants (preventive / outage / auto / curative)
+  instants = RAO.get_instants(crac)
+  @test names(instants) == ["id", "kind", "order"]
+  @test size(instants, 1) == 4
+
+  # Flow CNECs are the substance of this CRAC
+  flow_cnecs = RAO.get_flow_cnecs(crac)
+  @test size(flow_cnecs, 1) == 7
+  @test issubset(["id", "network_element_id", "instant", "contingency_id"], names(flow_cnecs))
+
+  # This CRAC is a PST parade: exactly one PST range action, no network actions
+  pst = RAO.get_pst_range_actions(crac)
+  @test size(pst, 1) == 1
+  @test "network_element_id" in names(pst)
+  @test size(RAO.get_network_actions(crac), 1) == 0
+
+  # The angle/voltage CNEC accessors return the right (empty) schema for this CRAC
+  @test "importing_network_element_id" in names(RAO.get_angle_cnecs(crac))
+  @test "network_element_id" in names(RAO.get_voltage_cnecs(crac))
+end
