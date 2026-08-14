@@ -30,6 +30,7 @@ using PowsyblWorstCase
 const W = PowsyblWorstCase
 
 export flexibility_max, copperplate_bound, FlexibilityResult
+export max_exchange, copperplate_exchange_interval, ExchangeResult
 
 # ---------------------------------------------------------------------------
 # δ-parameterised uncertainty region
@@ -178,6 +179,98 @@ function flexibility_max(network; base::AbstractDict, monitored::AbstractDict,
         secure(mid) ? (lo = mid) : (hi = mid)
     end
     return FlexibilityResult(lo, delta_cp, true, last_worst[], iters[])
+end
+
+# ---------------------------------------------------------------------------
+# Maximum exchange (the power-transfer parameterisation)
+# ---------------------------------------------------------------------------
+"""
+    ExchangeResult
+
+* `emax`      — the largest manageable exchange (zone import beyond forecast, MW).
+* `interval`  — the copper-plate exchange interval `(lo, hi)`, an outer bound on what is
+                attainable at all; `emax ≤ hi`.
+* `secure_at_zero` — whether the forecast exchange itself is secure (else `emax = 0`).
+* `worst_injection`, `iterations`.
+"""
+struct ExchangeResult
+    emax::Float64
+    interval::Tuple{Float64,Float64}
+    secure_at_zero::Bool
+    worst_injection::Dict{String,Float64}
+    iterations::Int
+end
+
+"""
+    copperplate_exchange_interval(network, zone; participation = nothing, slack = nothing)
+        -> (lo, hi)
+
+The exchange interval attainable **ignoring every branch limit** — the copper plate. Only global
+power balance and generator capacity remain, so an import of `E` by `zone` must be covered by the
+responding generation's up-regulating headroom and an export by its down-regulating headroom.
+Removing the line limits can only enlarge the manageable set, so the true maximum exchange lies
+inside this interval; it brackets the search and rejects hopeless targets without an MILP.
+
+Following the reference construction the interval is computed in both directions and intersected.
+"""
+function copperplate_exchange_interval(network, zone; participation = nothing, slack = nothing)
+    gm = W.GridModel(network; slack = slack)
+    up, down = _headroom(gm, participation)
+    # zone imports E > 0 ⇒ deficit E covered by up-regulation; exports E < 0 ⇒ surplus by down.
+    return (-down, up)
+end
+
+"""
+    max_exchange(network; zone, box, monitored, participation = nothing, slack = nothing,
+                 emax_cap = nothing, tol = 1e-2, oracle_kwargs...) -> ExchangeResult
+
+Largest **exchange** — net import by `zone` beyond its forecast — for which the grid stays secure
+in the worst case, for a fixed preventive dispatch.
+
+* `zone` — the buses whose net injection deviation is the exchange.
+* `box`  — per-bus deviation bounds `Dict(bus => (lo, hi))`, bounding how an exchange may be
+  *composed*; the exchange bound itself is what is maximised.
+* everything else is forwarded to [`PowsyblWorstCase.worst_case_oracle`](@ref).
+
+The security test is monotone in the exchange bound, so the maximum is bisected inside the
+copper-plate interval, with the copper plate also acting as a pre-filter.
+"""
+function max_exchange(network; zone, box::AbstractDict, monitored::AbstractDict,
+                      participation = nothing, slack = nothing, emax_cap = nothing,
+                      tol = 1e-2, oracle_kwargs...)
+    zone = collect(String, zone)
+    lo_cp, hi_cp = copperplate_exchange_interval(network, zone; participation = participation, slack = slack)
+    last_worst = Ref(Dict{String,Float64}(n => 0.0 for n in keys(box)))
+    iters = Ref(0)
+    # import is a *negative* injection deviation in the zone, so an import cap of `e` is the
+    # exchange range [-e, 0].
+    function secure(e)
+        e > hi_cp + 1e-9 && return false            # beyond copper-plate adequacy
+        iters[] += 1
+        sol = W.worst_case_oracle(network; uncertain = box, monitored = monitored,
+                                  participation = participation, slack = slack,
+                                  exchange = (buses = zone, lo = -e, hi = 0.0), oracle_kwargs...)
+        last_worst[] = sol.worst_injection
+        return W.is_secure(sol)
+    end
+
+    if !secure(0.0)
+        return ExchangeResult(0.0, (lo_cp, hi_cp), false, last_worst[], iters[])
+    end
+    upper = emax_cap === nothing ? hi_cp : min(hi_cp, emax_cap)
+    if !isfinite(upper)
+        throw(ArgumentError("unbounded exchange search: pass `emax_cap` or give the responding " *
+                            "generators finite limits"))
+    end
+    if upper <= tol || secure(upper)
+        return ExchangeResult(upper, (lo_cp, hi_cp), true, last_worst[], iters[])
+    end
+    lo, hi = 0.0, upper
+    while hi - lo > tol
+        mid = 0.5 * (lo + hi)
+        secure(mid) ? (lo = mid) : (hi = mid)
+    end
+    return ExchangeResult(lo, (lo_cp, hi_cp), true, last_worst[], iters[])
 end
 
 end # module

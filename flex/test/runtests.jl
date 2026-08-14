@@ -82,6 +82,44 @@ end
     @test part.delta > slack.delta + 40.0
 end
 
+@testset "Copper-plate exchange interval" begin
+    # Only G1 (100 MW at the slack bus) responds: up-headroom g1max−100, down-headroom 100.
+    # An import by the zone needs up-regulation, an export needs down-regulation.
+    lo, hi = copperplate_exchange_interval(build_corridor(; g1max = 300.0), ["VL2_0"])
+    @test hi ≈ 200.0 atol = 1e-6
+    @test lo ≈ -100.0 atol = 1e-6
+end
+
+@testset "max_exchange: the transfer the corridor can absorb" begin
+    # Base flow 100 MW on L12; an import of E at B2 adds E to it, so with P^lim = 150 the largest
+    # manageable exchange is 50 MW — strictly inside the 200 MW copper-plate bound.
+    box = Dict("VL2_0" => (-1000.0, 0.0))        # per-bus box loose: the exchange bound binds
+    r = max_exchange(build_corridor(; g1max = 300.0); zone = ["VL2_0"], box = box,
+                     monitored = Dict("L12" => 150.0), tol = 0.05)
+    @test r.secure_at_zero
+    @test r.emax ≈ 50.0 atol = 0.2
+    @test r.interval == (-100.0, 200.0)
+    @test r.emax < r.interval[2]                 # copper plate is a valid outer bound
+
+    # Generation adequacy can bind before the network does: cap G1 at 115 MW and the copper-plate
+    # bound (15 MW) is below the 50 MW the line would allow, so it decides.
+    r2 = max_exchange(build_corridor(; g1max = 115.0); zone = ["VL2_0"], box = box,
+                      monitored = Dict("L12" => 150.0), tol = 0.05)
+    @test r2.interval[2] ≈ 15.0 atol = 1e-6
+    @test r2.emax ≈ 15.0 atol = 0.2
+end
+
+@testset "max_exchange: a participating local generator raises the transfer" begin
+    box = Dict("VL2_0" => (-1000.0, 0.0))
+    slack = max_exchange(build_corridor(); zone = ["VL2_0"], box = box,
+                         monitored = Dict("L12" => 150.0), tol = 0.05)
+    part  = max_exchange(build_corridor(); zone = ["VL2_0"], box = box,
+                         monitored = Dict("L12" => 150.0),
+                         participation = Dict("G1" => 1.0, "G2" => 1.0), emax_cap = 400.0, tol = 0.05)
+    @test slack.emax ≈ 50.0 atol = 0.3
+    @test part.emax ≈ 100.0 atol = 0.5           # G2 covers half the import locally
+end
+
 @testset "flexibility_max: insecure at the forecast box ⇒ zero flexibility" begin
     # P^lim = 90 < base flow 100: the forecast itself overloads, so there is no flexibility.
     r = flexibility_max(build_corridor(); base = BASE0, weights = LOAD_ONLY,
