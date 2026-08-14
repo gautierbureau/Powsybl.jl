@@ -160,6 +160,54 @@ same canonical medial, so it is two *instances* of one program, not two distinct
 This race is worth reproducing before any joint preventive optimisation: it is a pure
 wall-clock win that does not change the answer.
 
+### The three medial programs, formulated
+
+All three share the *same* medial model — node balance, the exchange definition, the four states,
+every device — and differ only in objective and a couple of constraints. Writing `V[d]` for the
+worst limit violation at discretization point `d` (plus its ignore term), `E` for the exchange and
+`E_max` for the current exchange bound:
+
+| Program | Problem | Solved by |
+|---|---|---|
+| **`mlp`** (canonical) | `max min( min_d V[d] , 0.001·(E_max − E) )` | min–max |
+| **`wcgen`** | `max min_d V[d]`  s.t. `0 ≤ E ≤ E_max` | min–max (**same solver**) |
+| **`aux`** | `min E`  s.t. `V[d] ≥ ε_R  ∀d` | SIP-RRHS |
+
+* **`mlp`** maximises the *minimum* of the violation and a small term rewarding **low** exchange —
+  a deliberately **balanced** scenario search (low exchange *and* high violation). The main
+  program's help text names this directly ("balanced scenario generation").
+* **`wcgen`** drops that balance term and instead *constrains* the exchange to the range, so it is
+  the **pure worst-violation search** — the same quantity as our oracle's `φ`.
+* **`aux`** is the odd one out and is genuinely a different algorithm: it **minimises the
+  exchange** subject to a violation of at least the restriction `ε_R` being forced at every point.
+  That is the restriction-of-the-right-hand-side scheme — solve a *restricted* problem to obtain a
+  valid **upper** bound on the safe exchange. Its two knobs are an initial restriction and a
+  reduction factor, matching `solve_rrhs`'s `epsilon` and `beta`.
+
+The decisive structural fact: **`mlp` and `wcgen` are solved by the same call** —
+`minmax_solver.solve(⟨max program⟩, llp, disc)` — with only the maximisation program swapped.
+In our code they should likewise be one model assembly with a different objective, which the
+shared `_build_program!` in `PowsyblWorstCase` now makes natural (the state loop is written once
+and the objective enters through a callback).
+
+### Do we have the algorithms?
+
+**Yes, for all three.** `SemiInfinite` exports `solve_bnf`, `solve_rrhs`, `solve_minmax` and
+`solve_esip_bnf`; the min–max covers `mlp` and `wcgen` (in grid-specialised form it *is*
+`worst_case_oracle`'s medial↔lower loop), and `solve_rrhs` covers `aux`. What is missing is not
+algorithms but **orchestration and parameterization**:
+
+1. all three objectives are written in terms of the **exchange** variable — without the exchange
+   parameterization none of them can even be *stated* in reference form, which is why it is the
+   first roadmap item;
+2. the auxiliary/medial **race**;
+3. one grid model assembly whose objective is swapped to give `mlp` vs `wcgen`.
+
+The dependency library carries several schemes we have not reproduced — an oracle-based SIP,
+generalized SIP/min–max variants, bilevel programs, and hybrid bounding solvers. None is needed
+for parity on this problem; the hybrid schemes are the natural direction only if the two-sided
+bounding is later tightened.
+
 ### Binaries
 
 `grid-screen` (the main solver, driving the grid-solver class), plus `validate_model`,
