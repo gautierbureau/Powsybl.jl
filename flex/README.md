@@ -74,9 +74,16 @@ r.emax      # the largest manageable exchange (MW)
 r.interval  # the copper-plate exchange interval — an outer bound on what is attainable at all
 ```
 
-Here the per-bus `box` bounds how an exchange may be **composed**, while the exchange bound itself
-is what gets maximised. The security test is monotone in that bound, so the maximum is bisected
-inside the copper-plate interval.
+Here the per-bus `box` bounds how an exchange may be **composed**, while the exchange itself is
+what gets maximised.
+
+**How it is solved.** Not by searching over transfer levels. The exchange is the *objective*: one
+solve returns the **smallest exchange at which correction fails**, and since everything below that
+is correctable by construction, that value *is* the frontier. Internally the corrective menu is
+grown by verifying each candidate scenario against the full corrective freedom, so the answer is
+exact rather than tolerance-limited. Pass `method = :bisection` for the older level-probing search;
+it is slower and only as accurate as `tol`, and is kept as an independent cross-check (the tests
+assert the two agree).
 
 Passing `restriction = ε` requires the grid to be secure *with a margin* rather than merely
 secure. The answer is then **conservative** — guaranteed achievable rather than sitting exactly on
@@ -126,7 +133,8 @@ four-state model with correctives, integer-mode devices, and the full PST automa
 
 Fixed preventive dispatch; both region parameterisations — the **scaled hyperbox** (`δ`) and the
 **power transfer** (`max_exchange`); the **copper-plate** bound and pre-filter for each; and
-**bisection** driving the worst-case oracle, with a **restriction** for conservative answers.
+**cutting** — the exchange as the objective, landing on the frontier in one solve — with
+bisection retained as a cross-check, and a **restriction** for conservative answers.
 Deferred: racing the restricted pass against the exact one (a pure wall-clock win, no change to
 the answer), a **certifying-scenario** pass to certify the reported interval, the medial's
 low-exchange/high-violation balance term (which belongs with an exchange *discretization* loop

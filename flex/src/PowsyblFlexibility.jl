@@ -222,24 +222,40 @@ end
 
 """
     max_exchange(network; zone, box, monitored, participation = nothing, slack = nothing,
-                 emax_cap = nothing, tol = 1e-2, oracle_kwargs...) -> ExchangeResult
+                 emax_cap = nothing, method = :cuts, tol = 1e-2, oracle_kwargs...) -> ExchangeResult
 
 Largest **exchange** — net import by `zone` beyond its forecast — for which the grid stays secure
 in the worst case, for a fixed preventive dispatch.
 
 * `zone` — the buses whose net injection deviation is the exchange.
 * `box`  — per-bus deviation bounds `Dict(bus => (lo, hi))`, bounding how an exchange may be
-  *composed*; the exchange bound itself is what is maximised.
+  *composed*; the exchange itself is what is maximised.
+* `method` — `:cuts` (default) makes the exchange the *objective*: one solve returns the smallest
+  exchange at which correction fails, which **is** the frontier. `:bisection` instead probes
+  transfer levels with the security oracle; it is slower and only as accurate as `tol`, and is
+  kept as an independent cross-check.
 * everything else is forwarded to [`PowsyblWorstCase.worst_case_oracle`](@ref).
 
-The security test is monotone in the exchange bound, so the maximum is bisected inside the
-copper-plate interval, with the copper plate also acting as a pre-filter.
+The copper-plate interval bounds the search in either case.
 """
 function max_exchange(network; zone, box::AbstractDict, monitored::AbstractDict,
                       participation = nothing, slack = nothing, emax_cap = nothing,
-                      tol = 1e-2, oracle_kwargs...)
+                      method::Symbol = :cuts, tol = 1e-2, oracle_kwargs...)
     zone = collect(String, zone)
     lo_cp, hi_cp = copperplate_exchange_interval(network, zone; participation = participation, slack = slack)
+    if method === :cuts
+        cap = emax_cap === nothing ? hi_cp : min(hi_cp, emax_cap)
+        isfinite(cap) || throw(ArgumentError("unbounded exchange search: pass `emax_cap` or give " *
+                                             "the responding generators finite limits"))
+        r = W.min_violating_exchange(network; zone = zone, uncertain = box, monitored = monitored,
+                                     e_cap = cap, participation = participation, slack = slack,
+                                     oracle_kwargs...)
+        r === nothing && return ExchangeResult(cap, (lo_cp, hi_cp), true,
+                                               Dict{String,Float64}(n => 0.0 for n in keys(box)), 1)
+        e, v = r
+        return ExchangeResult(e, (lo_cp, hi_cp), e > 0.0, v, 1)
+    end
+    method === :bisection || throw(ArgumentError("unknown method $(method); use :cuts or :bisection"))
     last_worst = Ref(Dict{String,Float64}(n => 0.0 for n in keys(box)))
     iters = Ref(0)
     # import is a *negative* injection deviation in the zone, so an import cap of `e` is the

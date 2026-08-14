@@ -98,7 +98,7 @@ end
     # manageable exchange is 50 MW — strictly inside the 200 MW copper-plate bound.
     box = Dict("VL2_0" => (-1000.0, 0.0))        # per-bus box loose: the exchange bound binds
     r = max_exchange(build_corridor(; g1max = 300.0); zone = ["VL2_0"], box = box,
-                     monitored = Dict("L12" => 150.0), tol = 0.05)
+                     monitored = Dict("L12" => 150.0), method = :bisection, tol = 0.05)
     @test r.secure_at_zero
     @test r.emax ≈ 50.0 atol = 0.2
     @test r.interval == (-100.0, 200.0)
@@ -107,7 +107,7 @@ end
     # Generation adequacy can bind before the network does: cap G1 at 115 MW and the copper-plate
     # bound (15 MW) is below the 50 MW the line would allow, so it decides.
     r2 = max_exchange(build_corridor(; g1max = 115.0); zone = ["VL2_0"], box = box,
-                      monitored = Dict("L12" => 150.0), tol = 0.05)
+                      monitored = Dict("L12" => 150.0), method = :bisection, tol = 0.05)
     @test r2.interval[2] ≈ 15.0 atol = 1e-6
     @test r2.emax ≈ 15.0 atol = 0.2
 end
@@ -115,9 +115,9 @@ end
 @testset "max_exchange: a participating local generator raises the transfer" begin
     box = Dict("VL2_0" => (-1000.0, 0.0))
     slack = max_exchange(build_corridor(); zone = ["VL2_0"], box = box,
-                         monitored = Dict("L12" => 150.0), tol = 0.05)
+                         monitored = Dict("L12" => 150.0), method = :bisection, tol = 0.05)
     part  = max_exchange(build_corridor(); zone = ["VL2_0"], box = box,
-                         monitored = Dict("L12" => 150.0),
+                         monitored = Dict("L12" => 150.0), method = :bisection,
                          participation = Dict("G1" => 1.0, "G2" => 1.0), emax_cap = 400.0, tol = 0.05)
     @test slack.emax ≈ 50.0 atol = 0.3
     @test part.emax ≈ 100.0 atol = 0.5           # G2 covers half the import locally
@@ -129,9 +129,9 @@ end
     box = Dict("VL2_0" => (-1000.0, 0.0))
     mon = Dict("L12" => 150.0)
     exact = max_exchange(build_corridor(; g1max = 300.0); zone = ["VL2_0"], box = box,
-                         monitored = mon, tol = 0.02)
+                         monitored = mon, method = :bisection, tol = 0.02)
     restr = max_exchange(build_corridor(; g1max = 300.0); zone = ["VL2_0"], box = box,
-                         monitored = mon, tol = 0.02, restriction = 0.1)
+                         monitored = mon, method = :bisection, tol = 0.02, restriction = 0.1)
     @test restr.emax < exact.emax                 # a margin costs transfer
     @test restr.emax > 0.0
     # the conservative answer really is securable: re-check it with the exact test
@@ -148,4 +148,22 @@ end
                         monitored = Dict("L12" => 90.0), tol = 0.05)
     @test !r.secure_at_base
     @test r.delta == 0.0
+end
+
+@testset "max_exchange: cuts and bisection agree (cuts in one solve)" begin
+    # The cutting method makes the exchange the objective, so it lands on the frontier directly;
+    # bisection probes levels. They must agree, and the cut answer is exact rather than tol-limited.
+    box = Dict("VL2_0" => (-1000.0, 0.0))
+    mon = Dict("L12" => 150.0)
+    cuts = max_exchange(build_corridor(; g1max = 300.0); zone = ["VL2_0"], box = box, monitored = mon)
+    bis  = max_exchange(build_corridor(; g1max = 300.0); zone = ["VL2_0"], box = box, monitored = mon,
+                        method = :bisection, tol = 0.01)
+    @test cuts.emax ≈ 50.0 atol = 1e-3          # exact, not tolerance-limited
+    @test cuts.emax ≈ bis.emax atol = 0.05      # and it agrees with the independent search
+    @test cuts.iterations == 1                  # one solve, no level probing
+    @test cuts.worst_injection["VL2_0"] ≈ -50.0 atol = 0.1
+
+    # Adequacy-bound case: the copper plate caps the range and nothing violates inside it.
+    r = max_exchange(build_corridor(; g1max = 115.0); zone = ["VL2_0"], box = box, monitored = mon)
+    @test r.emax ≈ 15.0 atol = 1e-3
 end
