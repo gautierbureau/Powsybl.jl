@@ -247,12 +247,37 @@ base solver and **reports the maximum exchange for a fixed preventive dispatch**
 That matters for us: our `flexibility_max` over a *fixed* dispatch is therefore comparable to what
 the reference actually ships, and jointly optimising `x` is beyond what either currently does.
 
+## Cross-validation against the reference six-bus benchmark
+
+The reference ships a six-bus instance with a closed-form maximum exchange and manually computed
+expected values (≈ 354.5 MW in one transfer sense, ≈ 991.0 MW in the other, at a balancing bound of
+2000 MW). Porting it produced a clean split of results.
+
+**The network ports exactly.** All six branch susceptances match the reference parameters to 1e-9
+(`100/x_pu` in MW/rad), all six nodal injections match, and the nominal case balances to exactly
+0.0 MW. Impedances, topology, per-unit scaling and injection signs are therefore all correct.
+
+**The uncertainty model does not yet match, and the benchmark identified precisely why.** We model
+uncertainty as an independent box per bus. The reference couples its uncertain generators: they
+share a *budget*, and a single sign binary forces **all** of them to move in the same direction
+(each offset is bounded by the positive part of the budget, or by the negative part, according to
+that one binary). Independent boxes therefore let the adversary push one uncertain generator to
+`+bound` while pulling another to `−bound`, creating a large internal transfer the reference
+forbids outright.
+
+A sweep over that freedom confirms it is the cause: at the reference's own setting our frontier
+collapses to zero (the adversary is simply too strong), at a quarter of it we get finite frontiers
+of the right order, and with the freedom removed nothing violates at all. The dependence is
+monotone and steep, exactly as an over-powerful adversary predicts.
+
+So the next modelling slice is a **coupled uncertain-generation set** — a shared budget with a
+common sign — rather than anything to do with the network or the algorithm.
+
 ## Gaps / roadmap (highest leverage first)
 
-1. **Exchange (power-transfer) parameterization** — the reference's *primary* objective is
-   max-exchange, not hyperbox-δ. Add a directional region `y = y⁰ + δ·d` and the matching
-   copper-plate exchange interval so results are directly comparable. This is the single change
-   that would put us on the same footing as the shipped reference.
+1. **Coupled uncertain generation** — a shared budget across the uncertain generators with a
+   single common sign, as above. This is what currently blocks numeric agreement on the six-bus
+   benchmark, and it is the last piece needed to reproduce its published values.
 2. **Two-sided bounding + worst-case-generation certificate** — replace our plain bisection with a
    lower/upper bounding pair (the RRHS restriction gives the conservative side, via
    `SemiInfinite.solve_rrhs`), and add a final worst-case-generation pass that certifies the
