@@ -40,7 +40,7 @@ import DataFrames
 
 const NET = Powsybl.Network
 
-export GridModel, WorstCaseSolution, worst_case_oracle, is_secure
+export GridModel, WorstCaseSolution, worst_case_oracle, is_secure, zone_exchange
 
 # ---------------------------------------------------------------------------
 # Branches (lines, PSTs, HVDC) and generators
@@ -552,16 +552,46 @@ function _corrective_response(gm, states, monitored, correctives, switchable, co
 end
 
 # ---------------------------------------------------------------------------
+# Exchange parameterisation
+#
+# The *exchange* is the net injection deviation of a zone of buses — the power that zone imports
+# beyond its forecast. Restricting the uncertainty to realisations whose exchange lies in a range
+# is the parameterisation used to ask "how much transfer can this grid absorb?", as opposed to a
+# per-bus box, which asks "how much can each injection move?".
+# ---------------------------------------------------------------------------
+"""
+    zone_exchange(v, spec) -> AffExpr
+
+The exchange expression `Σ_{n ∈ spec.buses} v[n]` over the uncertainty variables `v` (buses
+outside `v` contribute nothing). `spec` is a `NamedTuple` `(; buses, lo, hi)`.
+"""
+zone_exchange(v, spec) =
+    sum((v[n] for n in spec.buses if haskey(v, n)); init = AffExpr(0.0))
+
+_exchange_constraint!(model, v, ::Nothing) = nothing
+function _exchange_constraint!(model, v, spec)
+    e = zone_exchange(v, spec)
+    haskey(spec, :lo) && @constraint(model, e >= spec.lo)
+    haskey(spec, :hi) && @constraint(model, e <= spec.hi)
+    return e
+end
+
+# ---------------------------------------------------------------------------
 # Relaxed medial problem (MLP)
 # ---------------------------------------------------------------------------
 function _relaxed_medial(gm, states, monitored, uncertain, correctives, switchable, contingencies,
-                         participation, pst_limits, pst_model, candidates, bigM, opt, silent, balance_M)
+                         participation, pst_limits, pst_model, candidates, bigM, opt, silent, balance_M,
+                         exchange = nothing)
     model = Model(opt); silent && set_silent(model)
     v = Dict{String,Any}()
     for (n, (lo, hi)) in uncertain
         vn = @variable(model, base_name = "v_$(n)"); set_lower_bound(vn, lo); set_upper_bound(vn, hi)
         v[n] = vn
     end
+    # Exchange parameterisation: the net injection deviation of a zone is the *exchange*, and the
+    # uncertainty is restricted to realisations achieving an exchange in the given range. The
+    # per-bus box then bounds how the exchange may be composed, not how large it is.
+    _exchange_constraint!(model, v, exchange)
     inj_unc, inj_nom, drop_slack = _injection_model!(model, gm, participation, v, balance_M)
     @variable(model, η)
     # each candidate corrective response is a fixed menu entry; a binary picks the branch/state
@@ -610,6 +640,10 @@ Besides `uncertain`, `monitored`, `correctives`, `contingencies` and `participat
   with the trip propagating forward through the states. Its multiple (locally-consistent)
   equilibria are resolved to the physical one by a connected-reference trip test, so the automaton
   composes with the free `correctives` (the max/min bounds meet).
+* `exchange` — `(; buses, lo, hi)` to use the **exchange parameterisation**: the uncertainty is
+  restricted to realisations whose net injection deviation over `buses` (the zone's exchange) lies
+  in `[lo, hi]`. `uncertain` then bounds how the exchange may be composed per bus, while `lo`/`hi`
+  bound its size. Omit for a pure per-bus box.
 """
 function worst_case_oracle(network;
                            uncertain::AbstractDict, monitored::AbstractDict,
@@ -617,6 +651,7 @@ function worst_case_oracle(network;
                            participation::Union{Nothing,AbstractDict} = nothing,
                            hvdc = NamedTuple[], switchable = String[], pst_limits::AbstractDict = Dict{String,Float64}(),
                            pst_model::AbstractDict = Dict{String,Any}(),
+                           exchange = nothing,
                            slack::Union{Nothing,String} = nothing,
                            optimizer = HiGHS.Optimizer, tol = 1e-5, max_iter = 30,
                            bigM = 1e4, balance_bigM = 1e5, silent = true)
@@ -644,7 +679,7 @@ function worst_case_oracle(network;
     # (physical evaluation) agree: a single pass suffices and the reported `φ` is the response value.
     if isempty(correctives) && isempty(switch)
         ub, vstar = _relaxed_medial(gm, states, monitored, uncertain, correctives, switch, conts,
-                                    participation, pst_limits, pst_model, candidates, bigM, optimizer, silent, balance_bigM)
+                                    participation, pst_limits, pst_model, candidates, bigM, optimizer, silent, balance_bigM, exchange)
         lb, _ = _corrective_response(gm, states, monitored, correctives, switch, conts,
                                      participation, pst_limits, pst_model, vstar, optimizer, silent, bigM, balance_bigM)
         return WorstCaseSolution(lb, lb <= tol, vstar, Dict{String,Dict{String,Float64}}(), 1, lb, ub)
@@ -653,7 +688,7 @@ function worst_case_oracle(network;
     for k in 1:max_iter
         iterations = k
         ub, vstar = _relaxed_medial(gm, states, monitored, uncertain, correctives, switch, conts,
-                                    participation, pst_limits, pst_model, candidates, bigM, optimizer, silent, balance_bigM)
+                                    participation, pst_limits, pst_model, candidates, bigM, optimizer, silent, balance_bigM, exchange)
         lb, ac = _corrective_response(gm, states, monitored, correctives, switch, conts,
                                       participation, pst_limits, pst_model, vstar, optimizer, silent, bigM, balance_bigM)
         if lb > best_lb

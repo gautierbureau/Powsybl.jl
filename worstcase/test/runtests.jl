@@ -267,6 +267,34 @@ end
     @test sol.phi ≈ -0.1694 atol = 5e-3
 end
 
+@testset "Exchange parameterisation (zone transfer instead of a per-bus box)" begin
+    # Zone = {B3}. Its net injection deviation *is* the exchange, so bounding the exchange bounds
+    # the transfer down the corridor regardless of how the per-bus box is drawn: with a generous
+    # per-bus box, an exchange capped at −60 MW (60 MW of extra import) keeps L12a within 110 MW,
+    # while capping it at −150 MW does not.
+    # Base flow on L12a is ≈ 70.4 MW and grows by ≈ 0.352 MW per MW of extra import at B3, so a
+    # 60 MW transfer gives ≈ 91.5 MW (secure vs. 110) and a 150 MW one ≈ 123.2 MW (insecure).
+    box = Dict("VL3_0" => (-300.0, 0.0))          # per-bus box: deliberately loose
+    zone = ["VL3_0"]
+    L12a(x) = 200.0 * 500 / 700 * (291.67 / 591.67) * (200 + x) / 200
+    orc(lo) = W.worst_case_oracle(build_ext(); uncertain = box, monitored = Dict("L12a" => 110.0),
+                                  exchange = (buses = zone, lo = lo, hi = 0.0))
+    tight = orc(-60.0)
+    loose = orc(-150.0)
+    @test W.is_secure(tight)
+    @test tight.phi ≈ L12a(60) / 110 - 1 atol = 5e-3
+    @test !W.is_secure(loose)
+    @test loose.phi ≈ L12a(150) / 110 - 1 atol = 5e-3
+    # the binding realisation sits at the exchange bound, not at the (looser) per-bus bound
+    @test loose.worst_injection["VL3_0"] ≈ -150.0 atol = 1e-2
+
+    # Without the exchange restriction the whole per-bus box is available, and it is worse.
+    nolim = W.worst_case_oracle(build_ext(); uncertain = box, monitored = Dict("L12a" => 110.0))
+    @test !W.is_secure(nolim)
+    @test nolim.phi ≈ L12a(300) / 110 - 1 atol = 5e-3
+    @test nolim.phi > loose.phi                   # a wider transfer ⇒ a worse overload
+end
+
 @testset "Base-only robust check (no contingency, no corrective action)" begin
     # With no contingency there is no post-corrective state, so the PST cannot act; extra load
     # that overloads L12a in the base state is therefore uncorrectable.
