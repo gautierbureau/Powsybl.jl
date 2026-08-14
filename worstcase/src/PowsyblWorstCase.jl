@@ -40,7 +40,7 @@ import DataFrames
 
 const NET = Powsybl.Network
 
-export GridModel, WorstCaseSolution, worst_case_oracle, is_secure, zone_exchange
+export GridModel, WorstCaseSolution, worst_case_oracle, is_secure, zone_exchange, min_violating_exchange
 
 # ---------------------------------------------------------------------------
 # Branches (lines, PSTs, HVDC) and generators
@@ -611,6 +611,90 @@ function _relaxed_medial(gm, states, monitored, uncertain, correctives, switchab
     @objective(model, Max, η)
     optimize!(model)
     return objective_value(model), Dict(n => value(v[n]) for n in keys(uncertain))
+end
+
+# ---------------------------------------------------------------------------
+# Smallest uncorrectable exchange
+#
+# The security question "how much transfer can this grid absorb?" does not need a search over
+# transfer levels. Ask instead for the *smallest* exchange at which correction fails: everything
+# below it is correctable by construction, so that value **is** the frontier.
+#
+# The program minimises the exchange subject to every corrective response in a menu leaving a
+# violation. That menu is grown the usual way: a candidate scenario is verified against the full
+# corrective freedom, and if it turns out correctable the response that fixes it is added and the
+# minimisation repeated. On exit the scenario defeats *all* corrective responses, so its exchange
+# is the frontier — reached by cutting, not by bisection.
+# ---------------------------------------------------------------------------
+"""
+    min_violating_exchange(network; zone, uncertain, monitored, e_cap, ...) -> (exchange, injection) | nothing
+
+The smallest zone import at which no corrective response keeps every monitored branch within its
+limits, searched within `[0, e_cap]`. Returns `nothing` when the grid is securable across the
+whole range — i.e. when `e_cap` itself is achievable.
+
+`restriction` requires the violation to exceed a margin, making the answer conservative. All other
+keywords match [`worst_case_oracle`](@ref).
+"""
+function min_violating_exchange(network;
+                                zone, uncertain::AbstractDict, monitored::AbstractDict, e_cap::Real,
+                                correctives = String[], contingencies = String[],
+                                participation::Union{Nothing,AbstractDict} = nothing,
+                                hvdc = NamedTuple[], switchable = String[],
+                                pst_limits::AbstractDict = Dict{String,Float64}(),
+                                pst_model::AbstractDict = Dict{String,Any}(),
+                                slack::Union{Nothing,String} = nothing,
+                                optimizer = HiGHS.Optimizer, restriction = 0.0, tol = 1e-5,
+                                max_iter = 30, bigM = 1e4, balance_bigM = 1e5, silent = true)
+    gm = GridModel(network; slack = slack)
+    for h in hvdc
+        push!(gm.branches, Hvdc(h.id, h.bus1, h.bus2, h.p_zero, h.k, h.p_lim))
+    end
+    conts = collect(String, contingencies)
+    correctives = collect(String, correctives)
+    switch = Set(collect(String, switchable))
+    states = _states(conts)
+    zone = collect(String, zone)
+
+    Cand = Dict{Tuple{String,String},NamedTuple{(:alpha, :open),Tuple{Float64,Bool}}}
+    menu = Cand[Cand()]
+
+    for _ in 1:max_iter
+        model = Model(optimizer); silent && set_silent(model)
+        v = Dict{String,Any}()
+        for (n, (lo, hi)) in uncertain
+            vn = @variable(model, base_name = "v_$(n)"); set_lower_bound(vn, lo); set_upper_bound(vn, hi)
+            v[n] = vn
+        end
+        E = @variable(model, base_name = "E"); set_lower_bound(E, 0.0); set_upper_bound(E, e_cap)
+        @constraint(model, zone_exchange(v, (buses = zone,)) == -E)   # import ⇒ negative deviation
+        inj_unc, inj_nom, drop_slack = _injection_model!(model, gm, participation, v, balance_bigM)
+        for (j, cand) in enumerate(menu)
+            sel = VariableRef[]
+            _build_program!(model, gm, states, monitored, correctives, switch, pst_limits, pst_model,
+                            inj_unc, inj_nom, drop_slack, bigM, "m$(j)_",
+                            (pid, c) -> (haskey(cand, (pid, c)) ? cand[(pid, c)].alpha : nothing),
+                            (pid, c) -> (haskey(cand, (pid, c)) ? cand[(pid, c)].open : nothing),
+                            function (o)
+                                b = @variable(model, binary = true); push!(sel, b)
+                                @constraint(model, o >= restriction - bigM * (1 - b))
+                            end)
+            @constraint(model, sum(sel) == 1)      # this response must leave some branch violated
+        end
+        @objective(model, Min, E)
+        optimize!(model)
+        termination_status(model) == MOI.OPTIMAL || return nothing   # nothing violates within e_cap
+        e = value(E)
+        vstar = Dict(n => value(v[n]) for n in keys(uncertain))
+
+        # Verify the candidate against the full corrective freedom, not just the menu.
+        phi, ac = _corrective_response(gm, states, monitored, correctives, switch, conts,
+                                       participation, pst_limits, pst_model, vstar,
+                                       optimizer, silent, bigM, balance_bigM)
+        phi > restriction - tol && return (e, vstar)   # genuinely uncorrectable ⇒ the frontier
+        push!(menu, ac)                                # correctable ⇒ enrich the menu and retry
+    end
+    return nothing
 end
 
 # ---------------------------------------------------------------------------

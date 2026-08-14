@@ -325,3 +325,31 @@ end
                                 correctives = ["PST_T"])
     @test W.is_secure(loose)
 end
+
+@testset "Smallest uncorrectable exchange (cuts, not bisection)" begin
+    # Corridor with L_B: base L12a ≈ 70.4 MW, growing ≈ 0.352 MW per MW imported at B3. Against a
+    # 110 MW limit the frontier is at (110 − 70.4)/0.352 ≈ 112.4 MW of import, and the program
+    # returns it directly — no search over transfer levels.
+    box = Dict("VL3_0" => (-400.0, 0.0))
+    base = 200.0 * 500 / 700 * (291.67 / 591.67)
+    slope = base / 200
+    frontier = (110.0 - base) / slope
+    r = W.min_violating_exchange(build_ext(); zone = ["VL3_0"], uncertain = box,
+                                 monitored = Dict("L12a" => 110.0), e_cap = 400.0)
+    @test r !== nothing
+    e, v = r
+    @test e ≈ frontier atol = 0.5
+    @test v["VL3_0"] ≈ -frontier atol = 0.5       # the binding scenario is the import itself
+
+    # Just below the frontier nothing violates, so the whole range is achievable.
+    @test W.min_violating_exchange(build_ext(); zone = ["VL3_0"], uncertain = box,
+              monitored = Dict("L12a" => 110.0), e_cap = frontier - 1.0) === nothing
+
+    # Cross-check against the security oracle: secure just below, insecure just above.
+    below = W.worst_case_oracle(build_ext(); uncertain = box, monitored = Dict("L12a" => 110.0),
+                exchange = (buses = ["VL3_0"], lo = -(frontier - 1.0), hi = 0.0))
+    above = W.worst_case_oracle(build_ext(); uncertain = box, monitored = Dict("L12a" => 110.0),
+                exchange = (buses = ["VL3_0"], lo = -(frontier + 1.0), hi = 0.0))
+    @test W.is_secure(below)
+    @test !W.is_secure(above)
+end
