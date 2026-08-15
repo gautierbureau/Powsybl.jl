@@ -54,6 +54,8 @@ with `x` the preventive actions (generator set-points). This is a three-level pr
 | Flexibility maximisation | `PowsyblFlexibility.flexibility_max` | the flexibility solver |
 | Copper-plate bound / pre-filter | `PowsyblFlexibility.copperplate_bound`, `copperplate_exchange_interval` | the copper-plate feasibility interval |
 | Exchange parameterisation | `PowsyblWorstCase` `exchange=`, `PowsyblFlexibility.max_exchange` | the exchange variable the objectives are written in |
+| Two-sided bounding | `PowsyblFlexibility.exchange_bracket` | the `aux` restriction schedule |
+| Certifying scenario | `PowsyblFlexibility.certifying_scenario` | `wcgen` post-processing |
 
 The factoring lines up almost one-to-one, which is good evidence the split is the right one.
 
@@ -151,10 +153,10 @@ appears in the solver loop):
 * **`aux`** — the RRHS-style auxiliary upper-bounding heuristic (a variant of the medial that
   maximises one quantity while constraining the other to stay positive).
 * **`wcgen`** — worst-case scenario generation: the medial with a revised objective, used to
-  certify the reported interval. Note the term is the *reference's*: it is **not** our
-  `PowsyblWorstCase` (a security test at a fixed uncertainty set) but the production of the
-  explicit binding scenario for a reported range. We call that a *certifying scenario* to keep
-  the two apart.
+  certify the reported interval. It runs as a **post-processing step** over the reported answer,
+  not inside the loop. Note the term is the *reference's*: it is **not** our `PowsyblWorstCase`
+  (a security test at a fixed uncertainty set) but the production of the explicit binding scenario
+  for a reported range. We call that a *certifying scenario* to keep the two apart.
 
 `cpf` and `wcgen` (and `aux`) are all *derived from* the medial formulation — each is the medial
 with a modified objective and an extra constraint — which is why they share its variables.
@@ -208,6 +210,19 @@ exit test verifies each candidate against the full corrective freedom rather tha
 
 What is *not* yet reproduced is running the two concurrently. Our two legs are independent solves
 and could be raced the way the reference races `aux` against `mlp`; today they run in sequence.
+
+**`wcgen` reads across just as directly.** Dropping the balance term and constraining the exchange
+to `[0, E_max]` leaves `max_v min_{u_c} max_{e,s} ratio` over that range — the oracle's `φ` with an
+exchange range instead of a fixed set. `PowsyblFlexibility.certifying_scenario` is that call plus
+the bookkeeping the reference wraps around it: the range is stepped just inside the reported bound
+(their `− 0.25·abs_tol`) so a scenario sitting on the boundary cannot fail on rounding, and an
+optional percentage extension looks deliberately *past* the bound to produce an illustrative
+failure — which, as their own help text says, is why only a zero extension tests the interval.
+
+Answering "where does it fail" needed one addition on the worst-case side: the oracle now reports
+the [`Binding`](../../worstcase) element — branch, state, outage, direction — that `φ` was attained
+on. Each overload expression is labelled as it is built, and whichever epigraph bound the response
+ends up sitting on is the one named. Without it the certificate is a number, not evidence.
 
 ### The bound bookkeeping (settled from the solver sources)
 
@@ -309,13 +324,9 @@ covered, and the six-bus benchmark reproduces exactly. What is left is performan
 1. **Monitored-line screening** (the reference's `filter` step) — drop from the model any branch
    whose flow bound already proves it cannot bind. The per-branch PTDF bounds above are exactly the
    quantity this needs, so it is now unblocked and is the largest remaining size reduction.
-2. **A certifying-scenario pass (`wcgen`)** — the one medial programme with no counterpart on our
-   side. Two-sided bounding is now done (`exchange_bracket`), but a bracket says where the answer
-   lies, not *why*; `wcgen` produces the explicit scenario that binds it. It is the medial with the
-   balance term dropped and the exchange constrained to the reported range, so it reuses the state
-   machinery wholesale. Jointly optimising the preventive actions `x` (`solve_esip_bnf` as the
-   outer driver) sits *above* this and is disabled in the reference — treat it as exploratory, not
-   as parity work.
+2. **Jointly optimising the preventive actions `x`** (`solve_esip_bnf` as the outer driver) — the
+   only level still missing entirely. It is disabled in the reference too, so treat it as
+   exploratory rather than parity work.
 3. **Racing the two bounding legs** — `exchange_bracket` runs them in sequence; the reference runs
    `aux` and `mlp` concurrently and lets the first to settle the step abort the other. Pure
    wall-clock, and it cannot change the answer, so it is worth doing only once the model size is

@@ -32,6 +32,7 @@ const W = PowsyblWorstCase
 export flexibility_max, copperplate_bound, FlexibilityResult
 export max_exchange, copperplate_exchange_interval, ExchangeResult
 export exchange_bracket, BracketResult
+export certifying_scenario, CertificateResult
 
 # ---------------------------------------------------------------------------
 # δ-parameterised uncertainty region
@@ -377,6 +378,74 @@ function exchange_bracket(network; zone, box::AbstractDict, monitored::AbstractD
     # Both legs are exact bounds, so any crossing is solver noise at a bracket already inside `tol`.
     lower = min(lower, upper)
     return BracketResult(lower, upper, closed_at, rounds, (lo_cp, hi_cp), witness)
+end
+
+# ---------------------------------------------------------------------------
+# Certifying scenario
+# ---------------------------------------------------------------------------
+# A reported maximum exchange is a claim about a whole range: *every* transfer up to it can be held
+# against every uncertainty. Searching that range for the worst violation settles the claim — no
+# violation and the range is confirmed, a violation and the scenario producing it is exactly the
+# counter-example. Either way the answer stops being a number the solver asserts and becomes one
+# that can be checked, which is why the reference runs this as a post-processing step over its own
+# reported interval rather than as part of the loop.
+#
+# It is the same medial programme the frontier search uses, with the low-exchange preference
+# dropped and the exchange constrained to the reported range instead — so it is the oracle's `φ`
+# over that range, and no new grid model is needed.
+# ---------------------------------------------------------------------------
+
+"""
+Result of [`certifying_scenario`](@ref).
+
+`clear` is `true` when nothing in the searched range violates. With `extension = 0` that confirms
+the reported interval; with an extension it merely reports what was found beyond it. When `clear`
+is `false`, the remaining fields *are* the counter-example: `phi` how badly it fails, `exchange` the
+transfer it sits at, `injection` the deviations realising it, `binding` the branch, state and
+direction that gave way, and `corrective` the best response that still could not save it.
+"""
+struct CertificateResult
+    clear::Bool
+    phi::Float64
+    exchange::Float64
+    injection::Dict{String,Float64}
+    binding::Union{Nothing,W.Binding}
+    corrective::Dict{String,Dict{String,Float64}}
+    tested::Tuple{Float64,Float64}
+end
+
+"""
+    certifying_scenario(network; zone, box, monitored, emax, extension = 0.0, step_in = 1e-6, ...)
+        -> CertificateResult
+
+Search the whole reported exchange range `[0, emax]` for the worst violation, certifying the range
+if none exists and producing the binding scenario if one does.
+
+This is the check that turns a reported maximum exchange into a claim that can be verified: the
+frontier search says where the boundary is, this says whether the region below it really holds, and
+names what gives way if it does not.
+
+`extension` widens the searched range by that percentage of `emax`. **Only `extension = 0` is a
+valid test of the reported interval** — a widened search deliberately looks past the boundary to
+produce an illustrative failure, so a violation it finds says nothing about the interval itself.
+`step_in` (MW) nudges the upper end just inside the reported bound so that a scenario sitting
+exactly on the boundary cannot fail the test on rounding alone.
+
+Arguments otherwise match [`max_exchange`](@ref); everything beyond them is forwarded to the oracle.
+"""
+function certifying_scenario(network; zone, box::AbstractDict, monitored::AbstractDict, emax::Real,
+                             extension = 0.0, step_in = 1e-6, participation = nothing,
+                             slack = nothing, oracle_kwargs...)
+    extension >= 0 || throw(ArgumentError("extension must be a non-negative percentage"))
+    zone = collect(String, zone)
+    hi = max(0.0, float(emax) * (1 + extension / 100) - step_in)
+    sol = W.worst_case_oracle(network; uncertain = box, monitored = monitored,
+                              participation = participation, slack = slack,
+                              exchange = (buses = zone, lo = -hi, hi = 0.0), oracle_kwargs...)
+    # an import is a negative deviation, so the transfer the scenario realises is minus the sum
+    e = -sum(get(sol.worst_injection, n, 0.0) for n in zone; init = 0.0)
+    return CertificateResult(W.is_secure(sol), sol.phi, e, sol.worst_injection, sol.binding,
+                             sol.corrective, (0.0, hi))
 end
 
 end # module

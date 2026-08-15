@@ -198,3 +198,40 @@ end
     @test_throws ArgumentError exchange_bracket(build_corridor(); zone = ["VL2_0"], box = box,
                                                 monitored = mon, reduction = 1.0)
 end
+
+@testset "certifying_scenario: confirm a reported range, or produce the counter-example" begin
+    # The corridor holds 50 MW of import against a 150 MW rating on L12. Searching that whole
+    # range for the worst violation is what turns the reported figure into a checkable claim.
+    box = Dict("VL2_0" => (-1000.0, 0.0))
+    mon = Dict("L12" => 150.0)
+    net() = build_corridor(; g1max = 300.0)
+
+    ok = certifying_scenario(net(); zone = ["VL2_0"], box = box, monitored = mon, emax = 50.0)
+    @test ok.clear                                # nothing in [0, 50] violates
+    @test ok.phi <= 0.0
+    @test ok.tested[2] < 50.0                     # stepped just inside the reported bound
+
+    # Overstate the answer and the certificate fails, handing back the scenario that breaks it.
+    bad = certifying_scenario(net(); zone = ["VL2_0"], box = box, monitored = mon, emax = 80.0)
+    @test !bad.clear
+    @test bad.phi ≈ 180.0 / 150.0 - 1 atol = 5e-3          # 100 + 80 MW over a 150 MW rating
+    @test bad.exchange ≈ 80.0 atol = 0.1                   # the binding transfer is the top of the range
+    @test bad.injection["VL2_0"] ≈ -80.0 atol = 0.1
+    @test bad.binding.branch == "L12"
+    @test bad.binding.direction == :forward
+
+    # An extension deliberately looks past the boundary, so it finds a failure by construction —
+    # useful as an illustration, not as a test of the interval.
+    ext = certifying_scenario(net(); zone = ["VL2_0"], box = box, monitored = mon,
+                              emax = 50.0, extension = 60.0)
+    @test ext.tested[2] ≈ 80.0 atol = 1e-3
+    @test !ext.clear
+    @test ext.phi ≈ bad.phi atol = 5e-3
+
+    # The frontier and the certificate have to agree: whatever max_exchange reports must certify.
+    e = max_exchange(net(); zone = ["VL2_0"], box = box, monitored = mon).emax
+    @test certifying_scenario(net(); zone = ["VL2_0"], box = box, monitored = mon, emax = e).clear
+
+    @test_throws ArgumentError certifying_scenario(net(); zone = ["VL2_0"], box = box,
+                                                   monitored = mon, emax = 50.0, extension = -1.0)
+end

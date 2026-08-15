@@ -38,9 +38,9 @@ Everything else here — the region parameterisations, the copper-plate bounds, 
 search logic; none of the grid physics lives in this package.
 
 **A third thing is *not* the same:** producing the explicit scenario that *certifies* a reported
-answer. That is a different objective over the same model (maximise the violation across the whole
-reported range, rather than test one set), and it is a deferred item. To keep it distinct from the
-oracle we call it a **certifying scenario**, not "worst-case generation".
+answer — `certifying_scenario`, below. That is a different question over the same model (search the
+whole reported range for the worst violation, rather than test one set). To keep it distinct from
+the oracle we call it a **certifying scenario**, not "worst-case generation".
 
 ## The copper-plate oracle (upper bound + pre-filter)
 
@@ -118,6 +118,31 @@ generation's **up**-regulating headroom and an export by its **down**-regulating
 brackets the search and rejects hopeless targets without an MILP — and cleanly separates the two
 regimes, the network binding or generation adequacy binding first.
 
+### Certifying the answer
+
+A reported maximum exchange is a claim about a whole *range* — that every transfer up to it can be
+held against every uncertainty. `certifying_scenario` settles that claim by searching the range for
+the worst violation:
+
+```julia
+c = certifying_scenario(network; zone = ["VL2_0"], box = box,
+                        monitored = Dict("L12" => 150.0), emax = r.emax)
+
+c.clear      # true ⇒ nothing in [0, emax] violates: the range is confirmed
+c.phi        # …and if it is false, the rest of the result is the counter-example:
+c.exchange   # the transfer the failing scenario sits at
+c.binding    # which branch, in which state and direction, gave way
+c.injection  # the deviations realising it
+```
+
+So the frontier search says where the boundary is, and this says whether the region below it really
+holds — naming what breaks if it does not. It is the same model with the exchange constrained to
+the reported range instead of fixed, so it costs one oracle call and no new modelling.
+
+`extension` widens the search past the boundary by a percentage. That is an *illustration* — a
+failure it finds says nothing about the interval, since it was told to look outside it. Only
+`extension = 0` tests the reported answer.
+
 ## The δ-parameterised region
 
 `T(δ)` grows each forecast box `(lo, hi)` outward by `δ · weight` per side. A weight may be a
@@ -159,9 +184,9 @@ Fixed preventive dispatch; both region parameterisations — the **scaled hyperb
 **cutting** — the exchange as the objective, landing on the frontier in one solve — with
 bisection retained as a cross-check, a **restriction** for conservative answers, and
 **two-sided bounding** (`exchange_bracket`) enclosing the answer between an achievable and a
-certified value.
+certified value; and a **certifying scenario** (`certifying_scenario`) that confirms a reported
+range or produces the counter-example that breaks it.
 Deferred: racing the two bounding legs against each other (a pure wall-clock win, no change to
-the answer), a **certifying-scenario** pass to certify the reported interval, the medial's
-low-exchange/high-violation balance term (which belongs with an exchange *discretization* loop
-rather than bisection), and jointly optimising the **preventive actions** `x` with the metric via
+the answer), the medial's low-exchange/high-violation balance term (which belongs with an exchange
+*discretization* loop rather than bisection), and jointly optimising the **preventive actions** `x` with the metric via
 the existence-constrained SIP outer loop ([`SemiInfinite`](../sip)).
