@@ -76,11 +76,12 @@ Falk–Hoffman/Blankenship exchange.
 
 **Per-direction ratings** are now done on our side: a monitored limit may be a `(lower, upper)`
 pair, read as the rating for the flow's own direction, so a violation is `ratio > 1` either way —
-the same device the reference uses. One detail remains worth adopting:
-
-* **Border-inclusive activation** — an activation threshold expressed as `Σ mode ≤ 1` (a state on
-  the boundary counts as *both* active and inactive) rather than a strict `= 1`, avoiding an
-  ε-discontinuity that our strict threshold introduces.
+the same device the reference uses. **Discrete taps** likewise: a corrective phase shifter may be
+restricted to its own tap table by a one-hot choice, as the reference's discrete variant does,
+though we keep the susceptance tap-independent rather than varying it per tap. One detail remains
+worth adopting: **border-inclusive activation**, where a threshold written `Σ mode ≤ 1` lets a
+state on the boundary count as both active and inactive, avoiding the ε-discontinuity our strict
+`= 1` introduces.
 
 ## Full PST automaton — two resolutions of the same problem
 
@@ -286,8 +287,9 @@ constant it replaces, and the benchmark reproduces with no hand-tuned setting.
 
 ## Gaps / roadmap (highest leverage first)
 
-1. **Discrete-tap phase shifters** — the reference has a discrete-tap variant alongside the
-   continuous one; ours is continuous only.
+1. **Border-inclusive activation** — the reference writes an activation threshold as `Σ mode ≤ 1`,
+   so a state exactly on the boundary counts as *both* active and inactive; ours uses a strict
+   `= 1`, which introduces an ε-discontinuity there.
 2. **Two-sided bounding + worst-case-generation certificate** — replace our plain bisection with a
    lower/upper bounding pair (the RRHS restriction gives the conservative side, via
    `SemiInfinite.solve_rrhs`), and add a final worst-case-generation pass that certifies the
