@@ -394,6 +394,37 @@ end
     @test W.is_secure(sol)
 end
 
+@testset "The reported overload names the element it was attained on" begin
+    # φ alone says how badly the grid fails; the binding element says where, which is what makes a
+    # reported value checkable rather than merely asserted.
+    # (1) base state, no contingency: L12a carries ≈ 70.4 MW forward against a 55 MW rating, and
+    # extra load at B3 pushes it higher still — which the nominal state, being free of uncertainty,
+    # does not see, so the base state is strictly the worse of the two and binds unambiguously.
+    sol = W.worst_case_oracle(build_ext(); uncertain = Dict("VL3_0" => (-100.0, 0.0)),
+                monitored = Dict("L12a" => (base = 55.0, contingency = 1e4, corrective = 1e4)))
+    @test sol.binding !== nothing
+    @test sol.binding.branch == "L12a"
+    @test sol.binding.state == :base
+    @test sol.binding.outage === nothing
+    @test sol.binding.direction == :forward
+
+    # (2) the same monitor tightened only post-contingency moves the binding element into the
+    # N-1 state of L_B, and the outage is named with it.
+    n1 = W.worst_case_oracle(build_ext(); uncertain = NO_UNC, contingencies = ["L_B"],
+                monitored = Dict("L12a" => (base = 1e4, contingency = 110.0, corrective = 1e4)))
+    @test !W.is_secure(n1)
+    @test n1.binding.branch == "L12a"
+    @test n1.binding.state == :contingency
+    @test n1.binding.outage == "L_B"
+
+    # (3) a reverse-direction overload is reported as such: with the flow running forward, an
+    # asymmetric rating that is tight on the *reverse* side is not what binds.
+    rev = W.worst_case_oracle(build_ext(); uncertain = Dict("VL3_0" => (0.0, 400.0)),
+                monitored = Dict("L12a" => (-55.0, 1e4)))
+    @test !W.is_secure(rev)
+    @test rev.binding.direction == :reverse       # the surplus reverses the corridor
+end
+
 @testset "A misspelled monitored branch is rejected, not silently ignored" begin
     # A state drops branches that are out in it, so the overload builder has to skip ids it cannot
     # find — which used to swallow a typo as well, reporting a serene "secure" for a grid on which

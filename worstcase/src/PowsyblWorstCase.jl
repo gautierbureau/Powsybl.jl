@@ -41,7 +41,8 @@ using LinearAlgebra: inv
 
 const NET = Powsybl.Network
 
-export GridModel, WorstCaseSolution, worst_case_oracle, is_secure, zone_exchange, min_violating_exchange
+export GridModel, WorstCaseSolution, Binding, worst_case_oracle, is_secure, zone_exchange,
+       min_violating_exchange
 
 # ---------------------------------------------------------------------------
 # Branches (lines, PSTs, HVDC) and generators
@@ -173,12 +174,36 @@ _nominal_injection(gm::GridModel) =
 # Result
 # ---------------------------------------------------------------------------
 """
+    Binding
+
+Which monitored branch, in which state and which direction, attains the reported overload. This is
+what turns a number into a certificate: `φ` says how badly the grid fails, `Binding` says where.
+
+`state` is one of `:nominal`, `:base`, `:contingency`, `:corrective`; `outage` is the contingency
+the state belongs to (`nothing` for the first two); and `direction` is `:forward` when the flow ran
+against the upper rating, `:reverse` against the lower.
+"""
+struct Binding
+    branch::String
+    state::Symbol
+    outage::Union{Nothing,String}
+    direction::Symbol
+end
+
+function Base.show(io::IO, b::Binding)
+    print(io, "Binding(", b.branch, " @ ", b.state,
+          b.outage === nothing ? "" : "[$(b.outage)]", ", ", b.direction, ")")
+end
+
+"""
     WorstCaseSolution
 
 * `phi`            — the worst achievable overload `max_v min_{u_c} max_{e,s}` (`> 0` ⇒ insecure).
 * `secure`         — whether `phi ≤ tol`.
 * `worst_injection`— the worst-case injection deviation `v*` per uncertain bus (MW).
 * `corrective`     — best corrective PST angles (rad), per contingency: `Dict(cont => Dict(pst => α))`.
+* `binding`        — the [`Binding`](@ref) element `phi` was attained on: which monitored branch,
+  in which state and direction. `nothing` only when nothing was monitored.
 * `iterations`, `lower_bound`, `upper_bound`.
 """
 struct WorstCaseSolution
@@ -189,6 +214,7 @@ struct WorstCaseSolution
     iterations::Int
     lower_bound::Float64
     upper_bound::Float64
+    binding::Union{Nothing,Binding}
 end
 
 is_secure(sol::WorstCaseSolution) = sol.secure
@@ -219,6 +245,11 @@ statename(::NominalState) = "nominal"
 statename(::BaseState) = "N"
 statename(s::ContingencyState) = "N-1[$(s.outage)]"
 statename(s::CorrectiveState) = "N-1/c[$(s.outage)]"
+
+statekind(::NominalState) = :nominal
+statekind(::BaseState) = :base
+statekind(::ContingencyState) = :contingency
+statekind(::CorrectiveState) = :corrective
 
 outage(::Union{NominalState,BaseState}) = nothing
 outage(s::Union{ContingencyState,CorrectiveState}) = s.outage
@@ -559,13 +590,16 @@ function _check_monitored(gm::GridModel, monitored)
     return nothing
 end
 
+# Each entry pairs the overload expression with the element it belongs to, so whichever one the
+# solver ends up sitting on can be named afterwards rather than merely counted.
 function _overloads(P, monitored, st::State)
-    out = Any[]
+    out = Tuple{Any,Binding}[]
     for (id, limspec) in monitored
         haskey(P, id) || continue
         lo, hi = _limit_pair(_limit(limspec, st))
-        push!(out, P[id] / hi - 1)     # binds when the flow exceeds its forward rating
-        push!(out, P[id] / lo - 1)     # …and when it exceeds the reverse one (lo < 0)
+        sn = statekind(st); oc = outage(st)
+        push!(out, (P[id] / hi - 1, Binding(id, sn, oc, :forward)))  # exceeds its forward rating
+        push!(out, (P[id] / lo - 1, Binding(id, sn, oc, :reverse)))  # …or the reverse one (lo < 0)
     end
     return out
 end
@@ -601,8 +635,8 @@ function _build_program!(model, gm, states, monitored, correctives, switchable, 
         sb = StateBuilder(gm, st, angle_of, open_of, plim_of, pst_model,
                           has_uncertainty(st) ? inj_unc : inj_nom, drop_slack, M, bigMs,
                           "$(tag_prefix)$(statename(st))", memo)
-        for o in _overloads(_add_state!(model, sb), monitored, st)
-            on_overload(o)
+        for (o, lbl) in _overloads(_add_state!(model, sb), monitored, st)
+            on_overload(o, lbl)
         end
     end
 end
@@ -635,17 +669,24 @@ function _corrective_response(gm, states, monitored, correctives, switchable, co
     end
     @variable(model, η)
     # correctives are free variables here; every overload is an epigraph lower bound on η
+    terms = Tuple{Any,Binding}[]
     _build_program!(model, gm, states, monitored, correctives, switchable, pst_limits, pst_model,
                     inj_unc, inj_nom, drop_slack, bigM, "",
                     (pid, c) -> get(α, (pid, c), nothing),
                     (pid, c) -> get(op, (pid, c), nothing),
-                    o -> @constraint(model, η >= o); bigMs = bigMs)
+                    function (o, lbl)
+                        push!(terms, (o, lbl))
+                        @constraint(model, η >= o)
+                    end; bigMs = bigMs)
     @objective(model, Min, η)
     optimize!(model)
     ac = Dict((pid, c) => (alpha = value(α[(pid, c)]),
                            open = haskey(op, (pid, c)) ? value(op[(pid, c)]) > 0.5 : false)
               for c in contingencies, pid in correctives)
-    return objective_value(model), ac
+    # η sits on whichever epigraph bound is tightest: that element is what the response could not
+    # relieve, and naming it is what makes the value a certificate rather than a number.
+    binding = isempty(terms) ? nothing : terms[argmax([value(o) for (o, _) in terms])][2]
+    return objective_value(model), ac, binding
 end
 
 # ---------------------------------------------------------------------------
@@ -904,7 +945,7 @@ function _relaxed_medial(gm, states, monitored, uncertain, correctives, switchab
                         inj_unc, inj_nom, drop_slack, bigM, "c$(j)_",
                         (pid, c) -> (haskey(cand, (pid, c)) ? cand[(pid, c)].alpha : nothing),
                         (pid, c) -> (haskey(cand, (pid, c)) ? cand[(pid, c)].open : nothing),
-                        function (o)
+                        function (o, _)
                             b = @variable(model, binary = true); push!(sel, b)
                             @constraint(model, η <= o + bigM * (1 - b))
                         end; bigMs = bigMs)
@@ -1014,7 +1055,7 @@ function min_violating_exchange(network;
                             inj_unc, inj_nom, drop_slack, bigM, "m$(j)_",
                             (pid, c) -> (haskey(cand, (pid, c)) ? cand[(pid, c)].alpha : nothing),
                             (pid, c) -> (haskey(cand, (pid, c)) ? cand[(pid, c)].open : nothing),
-                            function (o)
+                            function (o, _)
                                 b = @variable(model, binary = true); push!(sel, b)
                                 @constraint(model, o >= -restriction - bigM * (1 - b))
                             end; bigMs = bigMs)
@@ -1027,7 +1068,7 @@ function min_violating_exchange(network;
         vstar = Dict(n => value(v[n]) for n in keys(v))
 
         # Verify the candidate against the full corrective freedom, not just the menu.
-        phi, ac = _corrective_response(gm, states, monitored, correctives, switch, conts,
+        phi, ac, _ = _corrective_response(gm, states, monitored, correctives, switch, conts,
                                        participation, pst_limits, pst_model, vstar,
                                        optimizer, silent, bigM, balance_bigM, bigMs, emergency, discrete)
         phi > -restriction - tol && return (e, vstar)  # genuinely uncorrectable ⇒ the frontier
@@ -1114,6 +1155,7 @@ function worst_case_oracle(network;
     best_lb = -Inf
     vstar = Dict(n => 0.0 for n in _uncertain_buses(uncertain, ugens))
     corrective = Cand()
+    binding = nothing
     ub = Inf
     iterations = 0
 
@@ -1125,21 +1167,22 @@ function worst_case_oracle(network;
     if isempty(correctives) && isempty(switch)
         ub, vstar = _relaxed_medial(gm, states, monitored, uncertain, correctives, switch, conts,
                                     participation, pst_limits, pst_model, candidates, bigM, optimizer, silent, balance_bigM, exchange, ugens, bigMs, emergency)
-        lb, _ = _corrective_response(gm, states, monitored, correctives, switch, conts,
+        lb, _, bind = _corrective_response(gm, states, monitored, correctives, switch, conts,
                                      participation, pst_limits, pst_model, vstar, optimizer, silent, bigM, balance_bigM, bigMs, emergency, discrete)
         return WorstCaseSolution(lb, lb <= tol - restriction, vstar,
-                                 Dict{String,Dict{String,Float64}}(), 1, lb, ub)
+                                 Dict{String,Dict{String,Float64}}(), 1, lb, ub, bind)
     end
 
     for k in 1:max_iter
         iterations = k
         ub, vstar = _relaxed_medial(gm, states, monitored, uncertain, correctives, switch, conts,
                                     participation, pst_limits, pst_model, candidates, bigM, optimizer, silent, balance_bigM, exchange, ugens, bigMs, emergency)
-        lb, ac = _corrective_response(gm, states, monitored, correctives, switch, conts,
+        lb, ac, bind = _corrective_response(gm, states, monitored, correctives, switch, conts,
                                       participation, pst_limits, pst_model, vstar, optimizer, silent, bigM, balance_bigM, bigMs, emergency, discrete)
         if lb > best_lb
             best_lb = lb
             corrective = ac
+            binding = bind
         end
         ub - lb <= tol && break
         push!(candidates, ac)
@@ -1152,7 +1195,7 @@ function worst_case_oracle(network;
     end
 
     phi = best_lb
-    return WorstCaseSolution(phi, phi <= tol - restriction, vstar, corr_by_c, iterations, best_lb, ub)
+    return WorstCaseSolution(phi, phi <= tol - restriction, vstar, corr_by_c, iterations, best_lb, ub, binding)
 end
 
 end # module
