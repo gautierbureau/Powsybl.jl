@@ -558,3 +558,34 @@ end
     @test shared.phi > 0
     @test g1only.phi > shared.phi
 end
+
+@testset "Discrete tap positions for a corrective PST" begin
+    # Shifting the PST relieves L12a but loads the PST corridor itself, so the best corrective is
+    # an interior compromise rather than a bound — which is where discreteness actually bites.
+    mon = Dict("L12a"  => (base = 1e4, contingency = 1e4, corrective = 110.0),
+               "PST_T" => (base = 1e4, contingency = 1e4, corrective = 80.0))
+    kw = (uncertain = NO_UNC, monitored = mon, correctives = ["PST_T"], contingencies = ["L_B"])
+    cont = W.worst_case_oracle(build_ext(); kw...)
+    disc = W.worst_case_oracle(build_ext(); kw..., discrete = ["PST_T"])
+
+    taps = first(b for b in W.GridModel(build_ext()).branches if b isa W.Pst).taps
+    @test length(taps) == 21
+    @test rad2deg(taps[1]) ≈ -30.0 atol = 1e-9      # every 3° from −30 to +30
+    αc = cont.corrective["L_B"]["PST_T"]
+    αd = disc.corrective["L_B"]["PST_T"]
+
+    @test minimum(abs(αd - t) for t in taps) ≈ 0.0 atol = 1e-6   # lands on a real tap
+    @test minimum(abs(αc - t) for t in taps) > 1e-3              # the continuous one does not
+    @test rad2deg(αc) ≈ 10.856 atol = 5e-3
+    @test rad2deg(αd) ≈ 12.0 atol = 1e-3            # chosen, not rounded: 9° would be worse
+    @test disc.phi >= cont.phi - 1e-9               # discretising can only cost
+    @test disc.phi > cont.phi + 1e-3                # and here it does
+
+    # Where the continuous optimum already sits on a tap, the two agree exactly.
+    mon2 = Dict("L12a" => (base = 1e4, contingency = 1e4, corrective = 110.0))
+    kw2 = (uncertain = NO_UNC, monitored = mon2, correctives = ["PST_T"], contingencies = ["L_B"])
+    c2 = W.worst_case_oracle(build_ext(); kw2...)
+    d2 = W.worst_case_oracle(build_ext(); kw2..., discrete = ["PST_T"])
+    @test rad2deg(c2.corrective["L_B"]["PST_T"]) ≈ 30.0 atol = 1e-2
+    @test d2.phi ≈ c2.phi atol = 1e-6
+end

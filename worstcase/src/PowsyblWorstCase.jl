@@ -60,7 +60,13 @@ struct Line <: Branch
     h::Float64             # DC susceptance V²/x
 end
 
-"A phase-shifting transformer: `P = h·(Δθ + α)`, `α` preventive or corrective."
+"""
+A phase-shifting transformer: `P = h·(Δθ + α)`, with `α` preventive or corrective.
+
+`taps` are the angles the physical tap changer can actually reach, ascending. A corrective angle
+is continuous within `[alpha_min, alpha_max]` unless the device is declared discrete, in which
+case it must land on one of them.
+"""
 struct Pst <: Branch
     id::String
     bus1::String
@@ -69,6 +75,7 @@ struct Pst <: Branch
     alpha0::Float64        # preventive angle (rad)
     alpha_min::Float64
     alpha_max::Float64
+    taps::Vector{Float64}
 end
 
 "An HVDC link in AC emulation: `P = clamp(P⁰ + K·Δθ, ±P^lim)`."
@@ -147,7 +154,7 @@ function GridModel(network; slack::Union{Nothing,String} = nothing)
         if id in pst_ids
             a = get(alphas, id, Float64[0.0])
             push!(branches, Pst(id, tfos[i, :bus1_id], tfos[i, :bus2_id], h, get(alpha0, id, 0.0),
-                                minimum(a), maximum(a)))
+                                minimum(a), maximum(a), sort(a)))
         else
             push!(branches, Line(id, tfos[i, :bus1_id], tfos[i, :bus2_id], h))
         end
@@ -594,16 +601,25 @@ end
 # ---------------------------------------------------------------------------
 function _corrective_response(gm, states, monitored, correctives, switchable, contingencies,
                               participation, pst_limits, pst_model, vstar, opt, silent, bigM, balance_M,
-                              bigMs = Dict{String,Float64}(), emergency = String[])
+                              bigMs = Dict{String,Float64}(), emergency = String[],
+                              discrete = String[])
     model = Model(opt); silent && set_silent(model)
     inj_unc, inj_nom, drop_slack = _injection_model!(model, gm, participation, vstar, balance_M; emergency = emergency)
-    ranges = Dict(b.id => (b.alpha_min, b.alpha_max) for b in gm.branches if b isa Pst)
-    α = Dict{Tuple{String,String},VariableRef}()
+    psts = Dict(b.id => b for b in gm.branches if b isa Pst)
+    α = Dict{Tuple{String,String},Any}()
     op = Dict{Tuple{String,String},VariableRef}()
     for c in contingencies, pid in correctives
-        a = @variable(model, base_name = "α_$(pid)_$(c)")
-        set_lower_bound(a, ranges[pid][1]); set_upper_bound(a, ranges[pid][2])
-        α[(pid, c)] = a
+        br = psts[pid]
+        if pid in discrete && !isempty(br.taps)
+            # the tap changer can only stop where it has a tap: pick exactly one
+            z = @variable(model, [1:length(br.taps)], binary = true, base_name = "tap_$(pid)_$(c)")
+            @constraint(model, sum(z) == 1)
+            α[(pid, c)] = sum(br.taps[k] * z[k] for k in 1:length(br.taps))
+        else
+            a = @variable(model, base_name = "α_$(pid)_$(c)")
+            set_lower_bound(a, br.alpha_min); set_upper_bound(a, br.alpha_max)
+            α[(pid, c)] = a
+        end
         pid in switchable && (op[(pid, c)] = @variable(model, binary = true, base_name = "open_$(pid)_$(c)"))
     end
     @variable(model, η)
@@ -930,7 +946,7 @@ function min_violating_exchange(network;
                                 pst_limits::AbstractDict = Dict{String,Float64}(),
                                 pst_model::AbstractDict = Dict{String,Any}(),
                                 uncertain_generators = NamedTuple[], auto_bigM = true,
-                                emergency = String[],
+                                emergency = String[], discrete = String[],
                                 slack::Union{Nothing,String} = nothing,
                                 optimizer = HiGHS.Optimizer, restriction = 0.0, tol = 1e-5,
                                 direction = -1.0, offset = 0.0,
@@ -982,7 +998,7 @@ function min_violating_exchange(network;
         # Verify the candidate against the full corrective freedom, not just the menu.
         phi, ac = _corrective_response(gm, states, monitored, correctives, switch, conts,
                                        participation, pst_limits, pst_model, vstar,
-                                       optimizer, silent, bigM, balance_bigM, bigMs, emergency)
+                                       optimizer, silent, bigM, balance_bigM, bigMs, emergency, discrete)
         phi > -restriction - tol && return (e, vstar)  # genuinely uncorrectable ⇒ the frontier
         push!(menu, ac)                                # correctable ⇒ enrich the menu and retry
     end
@@ -1020,6 +1036,9 @@ Besides `uncertain`, `monitored`, `correctives`, `contingencies` and `participat
   `±r`), a `(lower, upper)` pair when the branch is rated differently per flow direction (with
   `lower < 0 < upper`), or a `NamedTuple` `(; base, contingency, corrective)` whose entries are
   themselves numbers or pairs, selecting per-state ratings.
+* `discrete` — PST ids whose corrective angle must land on an actual **tap**, rather than moving
+  continuously. Modelled as a one-hot choice over the device's tap table, so the answer is one the
+  tap changer can really reach.
 * `emergency` — generator ids held as **reserve**: they stay at their set point until every other
   responding generator has reached the bound in the direction the imbalance calls for, and only
   then respond. Reserve is held back rather than shared, unlike ordinary `participation`.
@@ -1040,7 +1059,7 @@ function worst_case_oracle(network;
                            pst_model::AbstractDict = Dict{String,Any}(),
                            exchange = nothing, restriction = 0.0,
                            uncertain_generators = NamedTuple[], auto_bigM = true,
-                           emergency = String[],
+                           emergency = String[], discrete = String[],
                            slack::Union{Nothing,String} = nothing,
                            optimizer = HiGHS.Optimizer, tol = 1e-5, max_iter = 30,
                            bigM = 1e4, balance_bigM = 1e5, silent = true)
@@ -1074,7 +1093,7 @@ function worst_case_oracle(network;
         ub, vstar = _relaxed_medial(gm, states, monitored, uncertain, correctives, switch, conts,
                                     participation, pst_limits, pst_model, candidates, bigM, optimizer, silent, balance_bigM, exchange, ugens, bigMs, emergency)
         lb, _ = _corrective_response(gm, states, monitored, correctives, switch, conts,
-                                     participation, pst_limits, pst_model, vstar, optimizer, silent, bigM, balance_bigM, bigMs, emergency)
+                                     participation, pst_limits, pst_model, vstar, optimizer, silent, bigM, balance_bigM, bigMs, emergency, discrete)
         return WorstCaseSolution(lb, lb <= tol - restriction, vstar,
                                  Dict{String,Dict{String,Float64}}(), 1, lb, ub)
     end
@@ -1084,7 +1103,7 @@ function worst_case_oracle(network;
         ub, vstar = _relaxed_medial(gm, states, monitored, uncertain, correctives, switch, conts,
                                     participation, pst_limits, pst_model, candidates, bigM, optimizer, silent, balance_bigM, exchange, ugens, bigMs, emergency)
         lb, ac = _corrective_response(gm, states, monitored, correctives, switch, conts,
-                                      participation, pst_limits, pst_model, vstar, optimizer, silent, bigM, balance_bigM, bigMs, emergency)
+                                      participation, pst_limits, pst_model, vstar, optimizer, silent, bigM, balance_bigM, bigMs, emergency, discrete)
         if lb > best_lb
             best_lb = lb
             corrective = ac
