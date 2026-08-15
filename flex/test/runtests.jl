@@ -167,3 +167,34 @@ end
     r = max_exchange(build_corridor(; g1max = 115.0); zone = ["VL2_0"], box = box, monitored = mon)
     @test r.emax ≈ 15.0 atol = 1e-3
 end
+
+@testset "exchange_bracket: two-sided bounding of the maximum exchange" begin
+    # Running the menu programme at +ε and at −ε encloses the frontier: the first reports a
+    # transfer that is certainly securable, the second one that certainly is not, and shrinking ε
+    # brings them together on the exact answer (50 MW here).
+    box = Dict("VL2_0" => (-1000.0, 0.0))
+    mon = Dict("L12" => 150.0)
+    b = exchange_bracket(build_corridor(; g1max = 300.0); zone = ["VL2_0"], box = box,
+                         monitored = mon, init_restriction = 0.1, reduction = 0.25, tol = 0.5)
+    @test b.lower <= 50.0 <= b.upper
+    @test b.upper - b.lower <= 0.5
+    @test b.rounds < 8                            # closed before exhausting the schedule
+    @test b.interval == (-100.0, 200.0)
+
+    # Both bounds are valid from the first round, so a bracket stopped early is still usable —
+    # and the lower one is a transfer the exact oracle confirms.
+    early = exchange_bracket(build_corridor(; g1max = 300.0); zone = ["VL2_0"], box = box,
+                             monitored = mon, init_restriction = 0.1, reduction = 0.25,
+                             tol = 0.5, max_rounds = 1)
+    @test early.rounds == 1
+    @test early.lower < b.lower                   # looser, but still on the right side
+    @test early.upper > b.upper
+    @test early.lower <= 50.0 <= early.upper
+    @test W.is_secure(W.worst_case_oracle(build_corridor(; g1max = 300.0); uncertain = box,
+                monitored = mon, exchange = (buses = ["VL2_0"], lo = -early.lower, hi = 0.0)))
+
+    @test_throws ArgumentError exchange_bracket(build_corridor(); zone = ["VL2_0"], box = box,
+                                                monitored = mon, init_restriction = 0.0)
+    @test_throws ArgumentError exchange_bracket(build_corridor(); zone = ["VL2_0"], box = box,
+                                                monitored = mon, reduction = 1.0)
+end

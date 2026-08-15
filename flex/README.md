@@ -89,6 +89,29 @@ Passing `restriction = ε` requires the grid to be secure *with a margin* rather
 secure. The answer is then **conservative** — guaranteed achievable rather than sitting exactly on
 the frontier — which is what lets a cheap restricted pass stand in for the exact one.
 
+### Bounding the answer from both sides
+
+The restriction says what counts as *failing*, and its sign decides which side of the frontier the
+answer lands on. Demand a margin and failure arrives sooner, so the reported transfer is one the
+grid can certainly hold; tolerate an overload and failure arrives later, so nothing above the
+reported transfer can be held. `exchange_bracket` runs both under a shrinking restriction:
+
+```julia
+b = exchange_bracket(network;
+    zone = ["VL2_0"], box = box, monitored = Dict("L12" => 150.0),
+    init_restriction = 0.1, reduction = 0.25, tol = 0.5)
+
+b.lower   # guaranteed achievable — the grid is securable across [0, lower]
+b.upper   # certified outer bound — no transfer above it can be held
+b.rounds  # restriction levels tried, two solves each
+```
+
+Both bounds are valid from the first round rather than only on convergence, because each leg's
+exit test verifies its candidate against the full corrective freedom. So a bracket stopped early
+is still a usable answer — quote `lower` to be safe, `upper` to know what is ruled out. Where a
+single exact solve is affordable, `max_exchange` is the cheaper route; the bracket earns its keep
+when it is not, or when the answer must come with a proof on each side.
+
 `copperplate_exchange_interval` gives that interval directly: with every branch limit dropped,
 only power balance and generator capacity remain, so an import must be covered by the responding
 generation's **up**-regulating headroom and an export by its **down**-regulating headroom. It
@@ -134,8 +157,10 @@ four-state model with correctives, integer-mode devices, and the full PST automa
 Fixed preventive dispatch; both region parameterisations — the **scaled hyperbox** (`δ`) and the
 **power transfer** (`max_exchange`); the **copper-plate** bound and pre-filter for each; and
 **cutting** — the exchange as the objective, landing on the frontier in one solve — with
-bisection retained as a cross-check, and a **restriction** for conservative answers.
-Deferred: racing the restricted pass against the exact one (a pure wall-clock win, no change to
+bisection retained as a cross-check, a **restriction** for conservative answers, and
+**two-sided bounding** (`exchange_bracket`) enclosing the answer between an achievable and a
+certified value.
+Deferred: racing the two bounding legs against each other (a pure wall-clock win, no change to
 the answer), a **certifying-scenario** pass to certify the reported interval, the medial's
 low-exchange/high-violation balance term (which belongs with an exchange *discretization* loop
 rather than bisection), and jointly optimising the **preventive actions** `x` with the metric via

@@ -31,6 +31,7 @@ const W = PowsyblWorstCase
 
 export flexibility_max, copperplate_bound, FlexibilityResult
 export max_exchange, copperplate_exchange_interval, ExchangeResult
+export exchange_bracket, BracketResult
 
 # ---------------------------------------------------------------------------
 # δ-parameterised uncertainty region
@@ -287,6 +288,95 @@ function max_exchange(network; zone, box::AbstractDict, monitored::AbstractDict,
         secure(mid) ? (lo = mid) : (hi = mid)
     end
     return ExchangeResult(lo, (lo_cp, hi_cp), true, last_worst[], iters[])
+end
+
+# ---------------------------------------------------------------------------
+# Two-sided bounding of the maximum exchange
+# ---------------------------------------------------------------------------
+# The same menu program bounds the frontier from either side depending on the sign of its
+# restriction: demanding a margin makes failure easier to reach and reports an achievable value
+# *below* the frontier, tolerating an overload makes it harder and reports a value *above* it. Run
+# both under a shrinking restriction and the two meet, each carrying its own guarantee — which is
+# what the reference obtains by running its auxiliary heuristic alongside the canonical medial
+# programme, its restriction parameter being ours with the opposite sign.
+#
+# Where a single exact solve is affordable this is strictly more work for the same number. It earns
+# its keep when it is not: the bounds are valid from the first round, so the loop can be stopped on
+# a bracket that is merely good enough, and the lower one is a transfer that has been shown to be
+# securable rather than one believed to be.
+# ---------------------------------------------------------------------------
+
+"""
+Result of [`exchange_bracket`](@ref) — the maximum exchange enclosed from both sides.
+
+`lower` is **guaranteed achievable** (the grid is securable across `[0, lower]`), `upper` is a
+**certified outer bound** (no transfer above it can be held), and the answer lies in between.
+`restriction` is the margin the bracket closed at, `rounds` the number of restriction levels
+tried — each costing two solves — and `worst_injection` the scenario witnessing `upper`.
+"""
+struct BracketResult
+    lower::Float64
+    upper::Float64
+    restriction::Float64
+    rounds::Int
+    interval::Tuple{Float64,Float64}
+    worst_injection::Dict{String,Float64}
+end
+
+"""
+    exchange_bracket(network; zone, box, monitored, init_restriction = 0.1, reduction = 0.25,
+                     tol = 1e-2, max_rounds = 8, emax_cap = nothing, ...) -> BracketResult
+
+Enclose the maximum exchange between a **guaranteed-achievable** lower bound and a **certified**
+upper bound, by running [`PowsyblWorstCase.min_violating_exchange`](@ref) at `+ε` and at `−ε` for a
+geometrically shrinking `ε`.
+
+The restriction starts at `init_restriction` and is multiplied by `reduction` each round; the loop
+stops once `upper − lower ≤ tol` or after `max_rounds`. Bounds accumulate monotonically, so the
+result is the tightest pair seen and remains valid however early the loop is cut short.
+
+Both bounds carry a guarantee at every round, not only on convergence, so a bracket that has not
+closed is still a usable answer: report `lower` to be safe, `upper` to know what is ruled out.
+Arguments are those of [`max_exchange`](@ref); everything beyond them is forwarded to the oracle.
+"""
+function exchange_bracket(network; zone, box::AbstractDict, monitored::AbstractDict,
+                          participation = nothing, slack = nothing, emax_cap = nothing,
+                          init_restriction = 0.1, reduction = 0.25, tol = 1e-2, max_rounds = 8,
+                          oracle_kwargs...)
+    init_restriction > 0 || throw(ArgumentError("init_restriction must be positive"))
+    0 < reduction < 1 || throw(ArgumentError("reduction must lie strictly between 0 and 1"))
+    zone = collect(String, zone)
+    lo_cp, hi_cp = copperplate_exchange_interval(network, zone; participation = participation, slack = slack)
+    cap = emax_cap === nothing ? hi_cp : min(hi_cp, emax_cap)
+    isfinite(cap) || throw(ArgumentError("unbounded exchange search: pass `emax_cap` or give the " *
+                                         "responding generators finite limits"))
+
+    # `nothing` means no scenario within the cap defeats correction at that restriction, so the cap
+    # itself is the best the leg can say.
+    function leg(ε)
+        r = W.min_violating_exchange(network; zone = zone, uncertain = box, monitored = monitored,
+                                     e_cap = cap, participation = participation, slack = slack,
+                                     restriction = ε, oracle_kwargs...)
+        return r === nothing ? (cap, Dict{String,Float64}(n => 0.0 for n in keys(box))) : r
+    end
+
+    lower, upper = 0.0, cap
+    witness = Dict{String,Float64}(n => 0.0 for n in keys(box))
+    ε = float(init_restriction)
+    closed_at = ε
+    rounds = 0
+    for _ in 1:max_rounds
+        rounds += 1
+        closed_at = ε
+        lower = max(lower, leg(ε)[1])              # margin demanded ⇒ achievable
+        u, w = leg(-ε)                             # overload tolerated ⇒ outer bound
+        u < upper && (upper = u; witness = w)
+        upper - lower <= tol && break
+        ε *= reduction
+    end
+    # Both legs are exact bounds, so any crossing is solver noise at a bracket already inside `tol`.
+    lower = min(lower, upper)
+    return BracketResult(lower, upper, closed_at, rounds, (lo_cp, hi_cp), witness)
 end
 
 end # module

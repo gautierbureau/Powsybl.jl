@@ -197,6 +197,18 @@ worst limit violation at discretization point `d` (plus its ignore term), `E` fo
   the restriction-of-the-right-hand-side scheme. Its two knobs are an initial restriction and a
   reduction factor, matching `solve_rrhs`'s `epsilon` and `beta`.
 
+**`aux` is a program we already had.** `min E` subject to a forced violation at every menu point is
+exactly `PowsyblWorstCase.min_violating_exchange`, and its `restriction` is `ε_R` **negated**: ours
+is a margin the grid must keep, theirs an overload the scenario must reach. So one function covers
+both directions, and running it at `+ε` and `−ε` encloses the answer —
+`PowsyblFlexibility.exchange_bracket` is that pair under a geometric restriction schedule, which is
+the reference's initial-restriction/reduction-factor pair. The lower bound is a transfer shown to be
+securable, the upper one a transfer shown not to be; both hold from the first round, because the
+exit test verifies each candidate against the full corrective freedom rather than against the menu.
+
+What is *not* yet reproduced is running the two concurrently. Our two legs are independent solves
+and could be raced the way the reference races `aux` against `mlp`; today they run in sequence.
+
 ### The bound bookkeeping (settled from the solver sources)
 
 The scheme **minimises internally**, which flips the sign of the objective and swaps which bound is
@@ -297,14 +309,17 @@ covered, and the six-bus benchmark reproduces exactly. What is left is performan
 1. **Monitored-line screening** (the reference's `filter` step) — drop from the model any branch
    whose flow bound already proves it cannot bind. The per-branch PTDF bounds above are exactly the
    quantity this needs, so it is now unblocked and is the largest remaining size reduction.
-2. **Two-sided bounding + certifying-scenario pass** — replace our plain bisection with a
-   lower/upper bounding pair (the RRHS restriction gives the conservative side, via
-   `SemiInfinite.solve_rrhs`), and add a final pass that certifies the reported interval with an
-   explicit scenario. Jointly optimising the preventive actions `x` (`solve_esip_bnf` as the outer
-   driver) sits *above* this and is disabled in the reference — treat it as exploratory, not as
-   parity work.
-3. **Racing the auxiliary programme against the canonical one** — pure wall-clock, and it cannot
-   change the answer, so it is worth doing only once the model size is settled.
+2. **A certifying-scenario pass (`wcgen`)** — the one medial programme with no counterpart on our
+   side. Two-sided bounding is now done (`exchange_bracket`), but a bracket says where the answer
+   lies, not *why*; `wcgen` produces the explicit scenario that binds it. It is the medial with the
+   balance term dropped and the exchange constrained to the reported range, so it reuses the state
+   machinery wholesale. Jointly optimising the preventive actions `x` (`solve_esip_bnf` as the
+   outer driver) sits *above* this and is disabled in the reference — treat it as exploratory, not
+   as parity work.
+3. **Racing the two bounding legs** — `exchange_bracket` runs them in sequence; the reference runs
+   `aux` and `mlp` concurrently and lets the first to settle the step abort the other. Pure
+   wall-clock, and it cannot change the answer, so it is worth doing only once the model size is
+   settled.
 4. A **corrective line automaton** as a device type, **per-tap admittance** (we keep the susceptance
    tap-independent), and **several cascading full shifters within one state** — scope extensions
    rather than fidelity gaps on the cases we model today.
