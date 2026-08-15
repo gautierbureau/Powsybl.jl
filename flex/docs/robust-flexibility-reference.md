@@ -78,10 +78,13 @@ Falk–Hoffman/Blankenship exchange.
 pair, read as the rating for the flow's own direction, so a violation is `ratio > 1` either way —
 the same device the reference uses. **Discrete taps** likewise: a corrective phase shifter may be
 restricted to its own tap table by a one-hot choice, as the reference's discrete variant does,
-though we keep the susceptance tap-independent rather than varying it per tap. One detail remains
-worth adopting: **border-inclusive activation**, where a threshold written `Σ mode ≤ 1` lets a
-state on the boundary count as both active and inactive, avoiding the ε-discontinuity our strict
-`= 1` introduces.
+though we keep the susceptance tap-independent rather than varying it per tap. **Border-inclusive
+activation** — a state exactly on the activation threshold counting as both active and inactive —
+turns out to need no work: our dichotomy is written with non-strict big-M inequalities on both
+sides, so at `|P^{N-1}| = P^act` both branches are admissible and the solver takes the better one.
+That is verified from both sides in the test suite (a fixture where activating is favourable and
+one where staying inactive is, each pinned at the exact threshold), so the strict-`= 1` mode
+selection carries no ε-discontinuity.
 
 ## Full PST automaton — two resolutions of the same problem
 
@@ -287,17 +290,21 @@ constant it replaces, and the benchmark reproduces with no hand-tuned setting.
 
 ## Gaps / roadmap (highest leverage first)
 
-1. **Border-inclusive activation** — the reference writes an activation threshold as `Σ mode ≤ 1`,
-   so a state exactly on the boundary counts as *both* active and inactive; ours uses a strict
-   `= 1`, which introduces an ε-discontinuity there.
-2. **Two-sided bounding + worst-case-generation certificate** — replace our plain bisection with a
+The model-fidelity list is now closed: per-direction ratings, coupled uncertain generation,
+merit-order balancing with emergency reserve, discrete taps and border-inclusive activation are all
+covered, and the six-bus benchmark reproduces exactly. What is left is performance and scope:
+
+1. **Monitored-line screening** (the reference's `filter` step) — drop from the model any branch
+   whose flow bound already proves it cannot bind. The per-branch PTDF bounds above are exactly the
+   quantity this needs, so it is now unblocked and is the largest remaining size reduction.
+2. **Two-sided bounding + certifying-scenario pass** — replace our plain bisection with a
    lower/upper bounding pair (the RRHS restriction gives the conservative side, via
-   `SemiInfinite.solve_rrhs`), and add a final worst-case-generation pass that certifies the
-   reported interval. Jointly optimising the preventive actions `x` (`solve_esip_bnf` as the outer
+   `SemiInfinite.solve_rrhs`), and add a final pass that certifies the reported interval with an
+   explicit scenario. Jointly optimising the preventive actions `x` (`solve_esip_bnf` as the outer
    driver) sits *above* this and is disabled in the reference — treat it as exploratory, not as
    parity work.
-3. **Richer load balancing** — merit-order (generators hit bounds in a fixed order) and **emergency
-   generators** (inject only when all others are capped), on top of our participation + saturation.
-4. **`discrete_shifter`** (discrete-tap PST) and a **corrective line automaton** as device types.
-5. **Asymmetric per-direction limits** and **border-inclusive activation** (cheap, do alongside the
-   above).
+3. **Racing the auxiliary programme against the canonical one** — pure wall-clock, and it cannot
+   change the answer, so it is worth doing only once the model size is settled.
+4. A **corrective line automaton** as a device type, **per-tap admittance** (we keep the susceptance
+   tap-independent), and **several cascading full shifters within one state** — scope extensions
+   rather than fidelity gaps on the cases we model today.
