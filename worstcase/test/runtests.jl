@@ -209,6 +209,31 @@ end
     @test stay.phi ≈ (200.0 * 500 / 700) / 150.0 - 1 atol = 5e-3   # L12a ≈ 142.86 MW, PST stays
 end
 
+@testset "PST activation is border-inclusive (both branches admitted at |P| = P^act)" begin
+    # The activation dichotomy is written with non-strict big-M inequalities on both sides, so a
+    # state sitting exactly on the threshold |P^{N-1}| = P^act admits *both* the active and the
+    # inactive branch; the solver then takes whichever suits the objective. Pinned here from both
+    # sides, because a one-sided check cannot tell inclusiveness from a tie-break convention.
+    nat = 200.0 * 320 / 1120            # ≈ 57.14 MW PST corridor flow after L_B out
+    orc(mon, pact) = W.worst_case_oracle(build_ext(); uncertain = NO_UNC, monitored = mon,
+            contingencies = ["L_B"],
+            pst_model = Dict("PST_T" => (p_lim = 300.0, p_act = pact, p_tar = 30.0)))
+
+    # Monitoring the PST itself makes *activating* the favourable branch: regulating to 30 MW sits
+    # inside the 40 MW rating, riding at 57 MW does not.
+    monP = Dict("PST_T" => (base = 1e4, contingency = 1e4, corrective = 40.0))
+    @test orc(monP, nat - 1.0).phi ≈ 30.0 / 40.0 - 1 atol = 5e-3      # below: must activate
+    @test orc(monP, nat).phi       ≈ 30.0 / 40.0 - 1 atol = 5e-3      # on the border: may activate
+    @test orc(monP, nat + 1.0).phi ≈ nat / 40.0 - 1 atol = 5e-3       # above: cannot activate
+
+    # Monitoring the parallel line flips the preference: regulating the corridor down to 30 MW
+    # pushes 170 MW onto L12a, whereas staying inactive leaves it at 142.86 MW.
+    monL = Dict("L12a" => (base = 1e4, contingency = 1e4, corrective = 150.0))
+    @test orc(monL, nat - 1.0).phi ≈ 170.0 / 150.0 - 1 atol = 5e-3            # below: forced active
+    @test orc(monL, nat).phi ≈ (200.0 * 500 / 700) / 150.0 - 1 atol = 5e-3    # border: may stay inactive
+    @test orc(monL, nat + 1.0).phi ≈ (200.0 * 500 / 700) / 150.0 - 1 atol = 5e-3  # above: inactive
+end
+
 # Two B1→B3 corridors, each through a PST: corridor A via PST_T (full automaton) and corridor F
 # via PST_F (a *free* corrective the operator controls). Outaging L_B loads both corridors.
 function build_two_pst()
