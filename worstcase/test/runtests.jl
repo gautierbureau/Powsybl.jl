@@ -387,3 +387,79 @@ end
     exp_ = f(+1.0, 0.0)
     @test exp_ === nothing || !isapprox(exp_[1], imp[1]; atol = 1.0)
 end
+
+# ---------------------------------------------------------------------------
+# Reference six-bus benchmark
+#
+# A published instance with a closed-form maximum exchange. Per-unit on a 100 MVA base, expressed
+# here in MW so that h = V²/x equals 100/x_pu. The foreign region is {1,4,5}; its forecast
+# exchange is -731 MW, so the exchange is measured from that offset in either direction.
+# ---------------------------------------------------------------------------
+const REF_KV = 400.0
+ref_x(x_pu) = REF_KV^2 * x_pu / 100
+
+function build_ref6(; bb_pu = 20.0)
+    net = NET.create_empty("ref6")
+    NET.create_substations(net; id = ["S$i" for i in 1:6], country = fill("FR", 6))
+    NET.create_voltage_levels(net; id = ["VL$i" for i in 1:6], substation_id = ["S$i" for i in 1:6],
+        topology_kind = fill("BUS_BREAKER", 6), nominal_v = fill(REF_KV, 6))
+    NET.create_buses(net; id = ["B$i" for i in 1:6], voltage_level_id = ["VL$i" for i in 1:6])
+    for (id, f, t, xp) in [("SIMP1", 2, 1, 0.20215535), ("SIMP2", 3, 4, 0.07687),
+                           ("SIMP3", 1, 4, 0.51732935), ("SIMP4", 3, 2, 0.51732935),
+                           ("SIMP5", 6, 3, 0.15374),    ("SIMP6", 4, 5, 0.15374)]
+        NET.create_lines(net; id = [id], voltage_level1_id = ["VL$f"], bus1_id = ["B$f"],
+            voltage_level2_id = ["VL$t"], bus2_id = ["B$t"], r = [0.0], x = [ref_x(xp)],
+            g1 = [0.0], b1 = [0.0], g2 = [0.0], b2 = [0.0])
+    end
+    gid  = ["LOADG1", "GENC1", "GENC2", "GENC3", "LOADG2", "LOADG3", "GENU1", "GENU2"]
+    gbus = [1, 2, 2, 3, 4, 4, 1, 4]
+    NET.create_generators(net; id = gid, voltage_level_id = ["VL$b" for b in gbus],
+        bus_id = ["B$b" for b in gbus], energy_source = fill("OTHER", 8),
+        min_p = [0.0, 100.0, 100.0, 100.0, 0.0, 0.0, -100bb_pu, -100bb_pu],
+        max_p = [1000.0, 1500.0, 1500.0, 1500.0, 1000.0, 1000.0, 100bb_pu, 100bb_pu],
+        target_p = [577.0, 577.0, 577.0, 577.0, 346.0, 346.0, 0.0, 0.0],
+        target_v = fill(REF_KV, 8), target_q = fill(0.0, 8), voltage_regulator_on = fill(false, 8))
+    NET.create_loads(net; id = ["LOADC1", "LOADC2", "LOADC4"],
+        voltage_level_id = ["VL1", "VL2", "VL5"], bus_id = ["B1", "B2", "B5"],
+        p0 = [1000.0, 1000.0, 1000.0], q0 = [0.0, 0.0, 0.0])
+    return net
+end
+
+const REF_ZONE   = ["VL1_0", "VL4_0", "VL5_0"]
+const REF_OFFSET = 731.0                       # minus the forecast foreign exchange (-731 MW)
+const REF_BOX    = Dict("VL1_0" => (-100.0, 1100.0), "VL4_0" => (-100.0, 100.0))
+const REF_MON    = Dict("SIMP1" => (base = 600.0, contingency = 1000.0, corrective = 600.0),
+                        "SIMP2" => (base = 600.0, contingency = 1000.0, corrective = 600.0))
+const REF_PART   = Dict("GENC1" => 1/3, "GENC2" => 1/3, "GENC3" => 1/3)
+const REF_HVDC   = [(id = "HVDC1", bus1 = "VL5_0", bus2 = "VL6_0",
+                     k = 100 / 0.04848135, p_zero = 0.0, p_lim = 500.0)]
+ref_ugens(bb) = [(id = "GENU1", bus = "VL1_0", controllable = (-100bb, 100bb)),
+                 (id = "GENU2", bus = "VL4_0", controllable = (-100bb, 100bb))]
+
+@testset "Reference six-bus benchmark: the network" begin
+    gm = W.GridModel(build_ref6(); slack = "VL1_0")
+    h = Dict(b.id => b.h for b in gm.branches)
+    for (id, xp) in [("SIMP1", 0.20215535), ("SIMP2", 0.07687), ("SIMP3", 0.51732935),
+                     ("SIMP4", 0.51732935), ("SIMP5", 0.15374), ("SIMP6", 0.15374)]
+        @test h[id] ≈ 100 / xp rtol = 1e-9         # admittance in MW/rad
+    end
+    inj = W._nominal_injection(gm)
+    for (n, p) in ["VL1_0" => -423.0, "VL2_0" => 154.0, "VL3_0" => 577.0,
+                   "VL4_0" => 692.0, "VL5_0" => -1000.0, "VL6_0" => 0.0]
+        @test inj[n] ≈ p atol = 1e-6
+    end
+    @test sum(values(inj)) ≈ 0.0 atol = 1e-9       # the forecast balances
+end
+
+@testset "Reference six-bus benchmark: maximum exchange" begin
+    # Published values, in MW, for each balancing bound and transfer sense.
+    for (bb, dir, expected) in [(20.0, +1.0, 354.473), (20.0, -1.0, 991.046),
+                                ( 7.0, +1.0, 398.954), ( 7.0, -1.0, 1174.987)]
+        r = W.min_violating_exchange(build_ref6(; bb_pu = bb); zone = REF_ZONE, uncertain = REF_BOX,
+                uncertain_generators = ref_ugens(bb), monitored = REF_MON, e_cap = 3000.0,
+                participation = REF_PART, hvdc = REF_HVDC, slack = "VL1_0",
+                direction = dir, offset = REF_OFFSET, bigM = 1e5, balance_bigM = 1e5)
+        @test r !== nothing
+        @test r[1] ≈ expected atol = 0.01          # inside the reference's own 1e-4 pu tolerance
+    end
+end

@@ -552,6 +552,59 @@ function _corrective_response(gm, states, monitored, correctives, switchable, co
 end
 
 # ---------------------------------------------------------------------------
+# Uncertainty set
+#
+# Two kinds of uncertainty compose into one deviation per bus:
+#
+#  * a plain **box** per bus (`uncertain`), for injections that move independently;
+#  * **uncertain generators** (`uncertain_generators`), whose deviation splits into an
+#    *uncontrollable* part free within its own bounds and a *controllable* part that is **coupled
+#    across every such generator**: they share a budget, and a single sign decides the direction
+#    they all move in.
+#
+# The coupling matters. With independent boxes the worst case may push one generator to its
+# positive bound while pulling another to its negative bound — a large internal transfer that a
+# common-mode uncertainty (a forecast error shared across a region) cannot actually produce. The
+# shared sign forbids exactly that.
+# ---------------------------------------------------------------------------
+_ug_range(g, field) = hasproperty(g, field) ? getproperty(g, field) : (0.0, 0.0)
+
+function _uncertainty_model!(model, uncertain, ugens)
+    dev = Dict{String,Any}()
+    for (n, (lo, hi)) in uncertain
+        vn = @variable(model, base_name = "v_$(n)"); set_lower_bound(vn, lo); set_upper_bound(vn, hi)
+        e = AffExpr(0.0); add_to_expression!(e, vn); dev[n] = e
+    end
+    isempty(ugens) && return dev
+
+    pos  = @variable(model, binary = true, base_name = "ug_positive")   # one sign for all of them
+    bpos = @variable(model, lower_bound = 0.0, base_name = "ug_budget_pos")
+    bneg = @variable(model, lower_bound = 0.0, base_name = "ug_budget_neg")
+    @constraint(model, bpos <= sum(_ug_range(g, :controllable)[2] for g in ugens; init = 0.0) * pos)
+    @constraint(model, bneg <= sum(-_ug_range(g, :controllable)[1] for g in ugens; init = 0.0) * (1 - pos))
+
+    ctl = VariableRef[]
+    for g in ugens
+        clo, chi = _ug_range(g, :controllable)
+        ulo, uhi = _ug_range(g, :uncontrollable)
+        c = @variable(model, base_name = "ug_ctl_$(g.id)")
+        u = @variable(model, base_name = "ug_unc_$(g.id)")
+        set_lower_bound(u, ulo); set_upper_bound(u, uhi)
+        @constraint(model, c <= chi * pos)              # all positive together …
+        @constraint(model, c >= clo * (1 - pos))        # … or all negative together
+        @constraint(model, c <= bpos)                   # each is bounded by the shared budget
+        @constraint(model, c >= -bneg)
+        push!(ctl, c)
+        e = get!(dev, g.bus, AffExpr(0.0))
+        add_to_expression!(e, c); add_to_expression!(e, u); dev[g.bus] = e
+    end
+    @constraint(model, sum(ctl) == bpos - bneg)         # the budget the group may spend
+    return dev
+end
+
+_uncertain_buses(uncertain, ugens) = union(Set(keys(uncertain)), Set(g.bus for g in ugens))
+
+# ---------------------------------------------------------------------------
 # Exchange parameterisation
 #
 # The *exchange* is the net injection deviation of a zone of buses — the power that zone imports
@@ -581,13 +634,9 @@ end
 # ---------------------------------------------------------------------------
 function _relaxed_medial(gm, states, monitored, uncertain, correctives, switchable, contingencies,
                          participation, pst_limits, pst_model, candidates, bigM, opt, silent, balance_M,
-                         exchange = nothing)
+                         exchange = nothing, ugens = NamedTuple[])
     model = Model(opt); silent && set_silent(model)
-    v = Dict{String,Any}()
-    for (n, (lo, hi)) in uncertain
-        vn = @variable(model, base_name = "v_$(n)"); set_lower_bound(vn, lo); set_upper_bound(vn, hi)
-        v[n] = vn
-    end
+    v = _uncertainty_model!(model, uncertain, ugens)
     # Exchange parameterisation: the net injection deviation of a zone is the *exchange*, and the
     # uncertainty is restricted to realisations achieving an exchange in the given range. The
     # per-bus box then bounds how the exchange may be composed, not how large it is.
@@ -610,7 +659,7 @@ function _relaxed_medial(gm, states, monitored, uncertain, correctives, switchab
     end
     @objective(model, Max, η)
     optimize!(model)
-    return objective_value(model), Dict(n => value(v[n]) for n in keys(uncertain))
+    return objective_value(model), Dict(n => value(v[n]) for n in keys(v))
 end
 
 # ---------------------------------------------------------------------------
@@ -654,6 +703,7 @@ function min_violating_exchange(network;
                                 hvdc = NamedTuple[], switchable = String[],
                                 pst_limits::AbstractDict = Dict{String,Float64}(),
                                 pst_model::AbstractDict = Dict{String,Any}(),
+                                uncertain_generators = NamedTuple[],
                                 slack::Union{Nothing,String} = nothing,
                                 optimizer = HiGHS.Optimizer, restriction = 0.0, tol = 1e-5,
                                 direction = -1.0, offset = 0.0,
@@ -667,17 +717,14 @@ function min_violating_exchange(network;
     switch = Set(collect(String, switchable))
     states = _states(conts)
     zone = collect(String, zone)
+    ugens = collect(uncertain_generators)
 
     Cand = Dict{Tuple{String,String},NamedTuple{(:alpha, :open),Tuple{Float64,Bool}}}
     menu = Cand[Cand()]
 
     for _ in 1:max_iter
         model = Model(optimizer); silent && set_silent(model)
-        v = Dict{String,Any}()
-        for (n, (lo, hi)) in uncertain
-            vn = @variable(model, base_name = "v_$(n)"); set_lower_bound(vn, lo); set_upper_bound(vn, hi)
-            v[n] = vn
-        end
+        v = _uncertainty_model!(model, uncertain, ugens)
         E = @variable(model, base_name = "E"); set_lower_bound(E, 0.0); set_upper_bound(E, e_cap)
         # The zone's net deviation realises the exchange: `direction` selects which way the
         # transfer runs (−1, the default, is an import by the zone) and `offset` shifts the zero
@@ -700,7 +747,7 @@ function min_violating_exchange(network;
         optimize!(model)
         termination_status(model) == MOI.OPTIMAL || return nothing   # nothing violates within e_cap
         e = value(E)
-        vstar = Dict(n => value(v[n]) for n in keys(uncertain))
+        vstar = Dict(n => value(v[n]) for n in keys(v))
 
         # Verify the candidate against the full corrective freedom, not just the menu.
         phi, ac = _corrective_response(gm, states, monitored, correctives, switch, conts,
@@ -755,6 +802,7 @@ function worst_case_oracle(network;
                            hvdc = NamedTuple[], switchable = String[], pst_limits::AbstractDict = Dict{String,Float64}(),
                            pst_model::AbstractDict = Dict{String,Any}(),
                            exchange = nothing, restriction = 0.0,
+                           uncertain_generators = NamedTuple[],
                            slack::Union{Nothing,String} = nothing,
                            optimizer = HiGHS.Optimizer, tol = 1e-5, max_iter = 30,
                            bigM = 1e4, balance_bigM = 1e5, silent = true)
@@ -766,11 +814,12 @@ function worst_case_oracle(network;
     correctives = collect(String, correctives)
     switch = Set(collect(String, switchable))
     states = _states(conts)
+    ugens = collect(uncertain_generators)
 
     Cand = Dict{Tuple{String,String},NamedTuple{(:alpha, :open),Tuple{Float64,Bool}}}
     candidates = Cand[Cand()]
     best_lb = -Inf
-    vstar = Dict(n => 0.0 for n in keys(uncertain))
+    vstar = Dict(n => 0.0 for n in _uncertain_buses(uncertain, ugens))
     corrective = Cand()
     ub = Inf
     iterations = 0
@@ -782,7 +831,7 @@ function worst_case_oracle(network;
     # (physical evaluation) agree: a single pass suffices and the reported `φ` is the response value.
     if isempty(correctives) && isempty(switch)
         ub, vstar = _relaxed_medial(gm, states, monitored, uncertain, correctives, switch, conts,
-                                    participation, pst_limits, pst_model, candidates, bigM, optimizer, silent, balance_bigM, exchange)
+                                    participation, pst_limits, pst_model, candidates, bigM, optimizer, silent, balance_bigM, exchange, ugens)
         lb, _ = _corrective_response(gm, states, monitored, correctives, switch, conts,
                                      participation, pst_limits, pst_model, vstar, optimizer, silent, bigM, balance_bigM)
         return WorstCaseSolution(lb, lb <= tol - restriction, vstar,
@@ -792,7 +841,7 @@ function worst_case_oracle(network;
     for k in 1:max_iter
         iterations = k
         ub, vstar = _relaxed_medial(gm, states, monitored, uncertain, correctives, switch, conts,
-                                    participation, pst_limits, pst_model, candidates, bigM, optimizer, silent, balance_bigM, exchange)
+                                    participation, pst_limits, pst_model, candidates, bigM, optimizer, silent, balance_bigM, exchange, ugens)
         lb, ac = _corrective_response(gm, states, monitored, correctives, switch, conts,
                                       participation, pst_limits, pst_model, vstar, optimizer, silent, bigM, balance_bigM)
         if lb > best_lb
