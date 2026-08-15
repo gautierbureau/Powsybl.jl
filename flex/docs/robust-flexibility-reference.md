@@ -74,9 +74,9 @@ a discretization point. A **coupling** step feeds worst-cases from the medial up
 discretization and corrective responses from the lower level into the medial — the bidirectional
 Falk–Hoffman/Blankenship exchange.
 
-One modelling detail worth adopting in our code (per-direction ratings, the other, is now done —
-a monitored limit may be a `(lower, upper)` pair, read as the rating for the flow's own direction
-so a violation is `ratio > 1` either way):
+**Per-direction ratings** are now done on our side: a monitored limit may be a `(lower, upper)`
+pair, read as the rating for the flow's own direction, so a violation is `ratio > 1` either way —
+the same device the reference uses. One detail remains worth adopting:
 
 * **Border-inclusive activation** — an activation threshold expressed as `Σ mode ≤ 1` (a state on
   the boundary counts as *both* active and inactive) rather than a strict `= 1`, avoiding an
