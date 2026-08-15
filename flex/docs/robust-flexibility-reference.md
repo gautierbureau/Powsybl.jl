@@ -126,7 +126,12 @@ The reference decomposes into **eight** programs, which split into two groups.
 **Prior/standalone procedures**, each its own binary, run before the main solve (none of them
 appears in the solver loop):
 
-* **`obbt`** — optimisation-based bound tightening: conservative bounds on the variables.
+* **`obbt`** — bound tightening. Despite the name it is not a per-variable loop: it is a *single*
+  solve returning one physically meaningful number, a rigorous bound on the largest angle
+  difference across any edge in any state. Every device big-M is then derived from it —
+  `min(admittance·(angle_bound + shift), currentBigM)` for a line, similarly for HVDC and
+  shifters — with `currentBigM`, a coarse user-supplied cap, as a safety net. One computed
+  quantity, per-device consequences.
 * **`cpf`** — copper-plate feasibility: the exchange interval attainable ignoring line limits,
   which brackets the search range (see *Copper-plate* above).
 * **`filter`** — monitored-line screening ("check if given monitored lines have potential for
@@ -269,11 +274,20 @@ With `uncertain_generators` added, **the benchmark reproduces**: all four publis
 exchanges — both transfer senses at each of two balancing bounds — match to **0.001 MW**, inside
 the reference's own 1e-4 pu tolerance. It is now a regression test.
 
+### Bound tightening, our version
+
+We take the same idea but bound **flows per branch** rather than one global angle, which is
+tighter and needs no solve: `|P_e| ≤ Σ_n |PTDF_{e,n}|·M_n + Σ_p |PSDF_{e,p}|·max|α_p|`, with `M_n`
+following from each bus's generator limits, load and share of the uncertainty. It is evaluated
+over every reachable topology — intact, each contingency, and each of those with a trippable
+protected shifter removed — and covers every branch, since an out or tripped one still enters the
+model through its would-be flow. On the six-bus benchmark this is **4.3× tighter** than the
+constant it replaces, and the benchmark reproduces with no hand-tuned setting.
+
 ## Gaps / roadmap (highest leverage first)
 
-1. **Bound tightening** — our big-M constants are hand-tuned and have already collided with a
-   model parameter once. The reference computes them. This is now the main obstacle to running on
-   networks larger than the benchmark.
+1. **Asymmetric per-direction limits** — a branch may be rated differently per flow direction; we
+   use a symmetric `|P|/lim`. Cheap, and real networks need it.
 2. **Two-sided bounding + worst-case-generation certificate** — replace our plain bisection with a
    lower/upper bounding pair (the RRHS restriction gives the conservative side, via
    `SemiInfinite.solve_rrhs`), and add a final worst-case-generation pass that certifies the
