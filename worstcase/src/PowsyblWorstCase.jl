@@ -548,6 +548,17 @@ function _automaton_flow!(model, br::Pst, θ, st::CorrectiveState, sb::StateBuil
     return P
 end
 
+# A state drops the branches that are out in it, so `_overloads` must skip ids it does not find —
+# which would also swallow a misspelled one, reporting a serene "secure" for a grid nothing was
+# actually monitored on. Catch that once, up front, against the whole network.
+function _check_monitored(gm::GridModel, monitored)
+    known = Set(b.id for b in gm.branches)
+    unknown = sort!([String(id) for id in keys(monitored) if !(id in known)])
+    isempty(unknown) || throw(ArgumentError("monitored branch(es) not in the network: " *
+        join(unknown, ", ") * "; known branches are " * join(sort!(collect(known)), ", ")))
+    return nothing
+end
+
 function _overloads(P, monitored, st::State)
     out = Any[]
     for (id, limspec) in monitored
@@ -916,6 +927,12 @@ end
 # corrective freedom, and if it turns out correctable the response that fixes it is added and the
 # minimisation repeated. On exit the scenario defeats *all* corrective responses, so its exchange
 # is the frontier — reached by cutting, not by bisection.
+#
+# `restriction` shifts what counts as failing and takes either sign, so the same program bounds the
+# frontier from both sides: a required margin (`> 0`) makes failure easier to reach and reports an
+# achievable **lower** bound, a tolerated overload (`< 0`) makes it harder and reports an **upper**
+# bound. Both are valid on return, not merely in the limit, because the exit test verifies against
+# the full corrective freedom rather than the menu.
 # ---------------------------------------------------------------------------
 """
     min_violating_exchange(network; zone, uncertain, monitored, e_cap, ...) -> (exchange, injection) | nothing
@@ -929,14 +946,27 @@ zone, `+1` an **export** — and `offset` shifts the zero point when the forecas
 non-zero, so that `E` is measured from the intended reference rather than from the forecast. The
 zone's net deviation is held at `direction * E + offset`.
 
-`restriction` is a required **security margin**, with the same meaning and the same direction as in
-[`worst_case_oracle`](@ref): a branch counts as failing when it no longer keeps the margin, so a
-larger restriction reports a **smaller** (conservative) frontier. All other keywords match the
-oracle.
+`restriction` is a **margin on what counts as failing**, with the same meaning and the same
+direction as in [`worst_case_oracle`](@ref), and it may be given either sign — which is what makes
+this one function bound the frontier from both sides:
 
-The value is **exact** on return, not tolerance-limited: the menu minimiser satisfies
-`E_menu ≤ E_true`, and when it is verified to defeat *every* corrective response it also witnesses
-`E_true ≤ e`, so the two coincide.
+* `restriction > 0` (a required security margin) — a branch fails once it no longer keeps the
+  margin, so more scenarios qualify and the reported frontier moves **down**. Everything below it
+  is correctable *with* margin, hence certainly secure: the value is a **lower bound**, guaranteed
+  achievable.
+* `restriction = 0` — bare violation, and the value is the frontier itself.
+* `restriction < 0` (a tolerated overload) — a branch fails only once it overloads by `|restriction|`,
+  so fewer scenarios qualify and the frontier moves **up**. Anything the grid can hold must lie
+  below it: the value is an **upper bound**.
+
+Running the two signs therefore brackets the exact answer, which is what the reference's auxiliary
+heuristic does with its own restriction parameter (of the opposite sign convention).
+
+The value is **exact** on return at `restriction = 0`, not tolerance-limited: the menu minimiser
+satisfies `E_menu ≤ E_true`, and when it is verified to defeat *every* corrective response it also
+witnesses `E_true ≤ e`, so the two coincide. The bounding property of the two signed variants
+likewise holds on return rather than only in the limit, because the exit test verifies the scenario
+against the *full* corrective freedom, not merely against the menu.
 """
 function min_violating_exchange(network;
                                 zone, uncertain::AbstractDict, monitored::AbstractDict, e_cap::Real,
@@ -955,6 +985,7 @@ function min_violating_exchange(network;
     for h in hvdc
         push!(gm.branches, Hvdc(h.id, h.bus1, h.bus2, h.p_zero, h.k, h.p_lim))
     end
+    _check_monitored(gm, monitored)
     conts = collect(String, contingencies)
     correctives = collect(String, correctives)
     switch = Set(collect(String, switchable))
@@ -1042,10 +1073,11 @@ Besides `uncertain`, `monitored`, `correctives`, `contingencies` and `participat
 * `emergency` — generator ids held as **reserve**: they stay at their set point until every other
   responding generator has reached the bound in the direction the imbalance calls for, and only
   then respond. Reserve is held back rather than shared, unlike ordinary `participation`.
-* `restriction` — tighten the security test by `ε_R ≥ 0`: the grid counts as secure only with a
-  margin, `φ ≤ −ε_R`. A restricted answer is **conservative**, so a configuration it accepts is
-  securable with room to spare — the restriction-of-the-right-hand-side idea, used to obtain
-  guaranteed-achievable values rather than the exact frontier. `0` gives the exact test.
+* `restriction` — shift the security test by `ε_R`: the grid counts as secure when `φ ≤ −ε_R`.
+  A positive `ε_R` demands a margin, so a configuration it accepts is securable with room to spare
+  — the restriction-of-the-right-hand-side idea, used to obtain guaranteed-achievable values rather
+  than the exact frontier. A negative `ε_R` tolerates an overload of `|ε_R|` and so relaxes the
+  test, which is the direction that yields outer bounds. `0` gives the exact test.
 * `exchange` — `(; buses, lo, hi)` to use the **exchange parameterisation**: the uncertainty is
   restricted to realisations whose net injection deviation over `buses` (the zone's exchange) lies
   in `[lo, hi]`. `uncertain` then bounds how the exchange may be composed per bus, while `lo`/`hi`
@@ -1067,6 +1099,7 @@ function worst_case_oracle(network;
     for h in hvdc
         push!(gm.branches, Hvdc(h.id, h.bus1, h.bus2, h.p_zero, h.k, h.p_lim))
     end
+    _check_monitored(gm, monitored)
     conts = collect(String, contingencies)
     correctives = collect(String, correctives)
     switch = Set(collect(String, switchable))

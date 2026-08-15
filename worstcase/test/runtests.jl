@@ -394,6 +394,46 @@ end
     @test W.is_secure(sol)
 end
 
+@testset "A misspelled monitored branch is rejected, not silently ignored" begin
+    # A state drops branches that are out in it, so the overload builder has to skip ids it cannot
+    # find — which used to swallow a typo as well, reporting a serene "secure" for a grid on which
+    # nothing was being monitored at all.
+    @test_throws ArgumentError W.worst_case_oracle(build_ext(); uncertain = NO_UNC,
+                monitored = Dict("L12" => 110.0))            # the real id is L12a
+    @test_throws ArgumentError W.min_violating_exchange(build_ext(); zone = ["VL3_0"],
+                uncertain = Dict("VL3_0" => (-400.0, 0.0)),
+                monitored = Dict("L12a" => 110.0, "nope" => 50.0), e_cap = 400.0)
+    # An id that only exists as an added HVDC branch is still legitimate.
+    hv = (id = "HV", bus1 = "VL1_0", bus2 = "VL3_0", p_zero = 0.0, k = 100.0, p_lim = 50.0)
+    @test W.worst_case_oracle(build_ext(with_LB = false); uncertain = NO_UNC,
+                monitored = Dict("HV" => 1e4), hvdc = [hv]) isa W.WorstCaseSolution
+end
+
+@testset "A signed restriction brackets the frontier from both sides" begin
+    # The restriction says what counts as failing, and its sign picks which side of the frontier
+    # the answer lands on: demand a margin and failure comes sooner, so the reported transfer is
+    # one that is certainly securable; tolerate an overload and failure comes later, so nothing
+    # above the reported transfer can be held. The exact value sits between the two.
+    box = Dict("VL3_0" => (-400.0, 0.0))
+    mon = Dict("L12a" => 110.0)
+    frontier(r) = W.min_violating_exchange(build_ext(); zone = ["VL3_0"], uncertain = box,
+                                           monitored = mon, e_cap = 400.0, restriction = r)[1]
+    base = 200.0 * 500 / 700 * (291.67 / 591.67)
+    exact = (110.0 - base) / (base / 200)
+
+    lo2, lo1, e0, hi1, hi2 = frontier(0.2), frontier(0.1), frontier(0.0), frontier(-0.1), frontier(-0.2)
+    @test e0 ≈ exact atol = 0.5
+    @test lo2 < lo1 < e0 < hi1 < hi2                     # monotone in the restriction
+    # Each side keeps its guarantee, checked against the oracle's own exact test.
+    @test W.is_secure(W.worst_case_oracle(build_ext(); uncertain = box, monitored = mon,
+                exchange = (buses = ["VL3_0"], lo = -lo1, hi = 0.0)))          # lower: achievable
+    @test !W.is_secure(W.worst_case_oracle(build_ext(); uncertain = box, monitored = mon,
+                exchange = (buses = ["VL3_0"], lo = -hi1, hi = 0.0)))          # upper: unreachable
+    # A tolerated overload is the oracle's relaxed test, so it accepts what the exact test rejects.
+    @test W.is_secure(W.worst_case_oracle(build_ext(); uncertain = box, monitored = mon,
+                restriction = -0.1, exchange = (buses = ["VL3_0"], lo = -(hi1 - 0.5), hi = 0.0)))
+end
+
 @testset "Exchange direction and zero point" begin
     # `direction` picks the sense of the transfer and `offset` moves the reference the exchange is
     # measured from — needed whenever the forecast exchange is not itself zero.
