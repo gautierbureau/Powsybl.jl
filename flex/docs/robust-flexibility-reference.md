@@ -74,10 +74,10 @@ a discretization point. A **coupling** step feeds worst-cases from the medial up
 discretization and corrective responses from the lower level into the medial — the bidirectional
 Falk–Hoffman/Blankenship exchange.
 
-Two modelling details worth adopting in our code:
+One modelling detail worth adopting in our code (per-direction ratings, the other, is now done —
+a monitored limit may be a `(lower, upper)` pair, read as the rating for the flow's own direction
+so a violation is `ratio > 1` either way):
 
-* **Asymmetric per-direction limits** (`P_limit_lower` / `P_limit_upper`) — a branch can have
-  different ratings per flow direction. We currently use a symmetric `|P|/lim`.
 * **Border-inclusive activation** — an activation threshold expressed as `Σ mode ≤ 1` (a state on
   the boundary counts as *both* active and inactive) rather than a strict `= 1`, avoiding an
   ε-discontinuity that our strict threshold introduces.
@@ -286,8 +286,9 @@ constant it replaces, and the benchmark reproduces with no hand-tuned setting.
 
 ## Gaps / roadmap (highest leverage first)
 
-1. **Asymmetric per-direction limits** — a branch may be rated differently per flow direction; we
-   use a symmetric `|P|/lim`. Cheap, and real networks need it.
+1. **Merit-order and emergency generators** — the reference's balancing has generators reaching
+   their bounds in a fixed order, and reserve units that inject only once the others are capped.
+   Ours is participation with saturation.
 2. **Two-sided bounding + worst-case-generation certificate** — replace our plain bisection with a
    lower/upper bounding pair (the RRHS restriction gives the conservative side, via
    `SemiInfinite.solve_rrhs`), and add a final worst-case-generation pass that certifies the
