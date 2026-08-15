@@ -256,29 +256,82 @@ end
 # ---------------------------------------------------------------------------
 # Injection model (secondary frequency response / single slack)
 # ---------------------------------------------------------------------------
-# y = mid(lo, x, hi) = clamp(x, lo, hi), modelled exactly with two big-M selections.
-function _clamp!(model, x, lo, hi, M)
+# y = mid(lo, x, hi) = clamp(x, lo, hi), modelled exactly with two big-M selections. The two
+# selectors say which side is saturated, which callers use to express ordering between clamps.
+function _clamp_modes!(model, x, lo, hi, M)
     m = @variable(model); δ = @variable(model, binary = true)
     @constraint(model, m <= hi); @constraint(model, m <= x)
     @constraint(model, m >= hi - M * (1 - δ)); @constraint(model, m >= x - M * δ)
     y = @variable(model); γ = @variable(model, binary = true)
     @constraint(model, y >= lo); @constraint(model, y >= m)
     @constraint(model, y <= lo + M * (1 - γ)); @constraint(model, y <= m + M * γ)
-    return y
+    return y, δ, γ                      # δ ⇒ held at `hi`;  γ ⇒ held at `lo`
 end
 
-function _injection_model!(model, gm, participation, v, balance_M)
+_clamp!(model, x, lo, hi, M) = _clamp_modes!(model, x, lo, hi, M)[1]
+
+# Merit order. Every responding unit follows the same demand signal, so the one needing the least
+# signal per unit of contribution saturates first — the order is already implied by the clamps.
+# Stating it explicitly cuts off relaxation solutions that violate it, which tightens the search
+# without changing the answer. Sorting and constraining consecutive pairs gives the whole order by
+# transitivity, so this costs O(n) constraints rather than O(n²).
+function _merit_order!(model, normal, participation, at_hi, at_lo)
+    resp = [g for g in normal if participation[g.id] != 0]
+    length(resp) < 2 && return
+    up = sort(resp; by = g -> (g.pmax - g.p0) / participation[g.id])   # headroom per contribution
+    dn = sort(resp; by = g -> (g.p0 - g.pmin) / participation[g.id])
+    for i in 1:(length(up) - 1)
+        @constraint(model, at_hi[up[i + 1].id] <= at_hi[up[i].id])
+    end
+    for i in 1:(length(dn) - 1)
+        @constraint(model, at_lo[dn[i + 1].id] <= at_lo[dn[i].id])
+    end
+    # …and the signal has one sign, so no unit sits at its floor while another sits at its ceiling.
+    @constraint(model, at_hi[up[1].id] + at_lo[dn[1].id] <= 1)
+    return
+end
+
+# Emergency reserve: a unit that stays at its set point until every ordinary responding unit has
+# reached the bound in the direction the imbalance calls for, and only then follows a signal of its
+# own. Reserve is held back rather than shared, which is what distinguishes it from participation.
+function _emergency_response!(model, gm, participation, reserve, normal, Pg, M)
+    units = [g for g in gm.generators if g.id in reserve && haskey(participation, g.id)]
+    isempty(units) && return
+    λe = @variable(model, base_name = "λ_reserve")
+    up = @variable(model, binary = true, base_name = "reserve_up")
+    dn = @variable(model, binary = true, base_name = "reserve_down")
+    @constraint(model, up + dn <= 1)
+    for g in normal                                   # armed only once the others are exhausted
+        @constraint(model, Pg[g.id] >= g.pmax - M * (1 - up))
+        @constraint(model, Pg[g.id] <= g.pmin + M * (1 - dn))
+    end
+    @constraint(model, λe <= M * up)                  # unarmed ⇒ no signal ⇒ held at its set point
+    @constraint(model, λe >= -M * dn)
+    for g in units
+        Pg[g.id] = _clamp!(model, g.p0 + λe * participation[g.id], g.pmin, g.pmax, M)
+    end
+    return
+end
+
+function _injection_model!(model, gm, participation, v, balance_M; emergency = String[])
     nom = _nominal_injection(gm)
     if participation === nothing
         inj = Dict{String,Any}(n => nom[n] + (haskey(v, n) ? v[n] : 0.0) for n in gm.buses)
         return inj, nom, true
     end
+    resp = [g for g in gm.generators if haskey(participation, g.id)]
+    reserve = Set(collect(String, emergency))
+    normal = [g for g in resp if !(g.id in reserve)]
+
     λ = @variable(model, base_name = "λ")
     Pg = Dict{String,Any}()
-    for g in gm.generators
-        haskey(participation, g.id) || continue
-        Pg[g.id] = _clamp!(model, g.p0 + λ * participation[g.id], g.pmin, g.pmax, balance_M)
+    at_hi = Dict{String,VariableRef}(); at_lo = Dict{String,VariableRef}()
+    for g in normal
+        y, δ, γ = _clamp_modes!(model, g.p0 + λ * participation[g.id], g.pmin, g.pmax, balance_M)
+        Pg[g.id] = y; at_hi[g.id] = δ; at_lo[g.id] = γ
     end
+    _merit_order!(model, normal, participation, at_hi, at_lo)
+    _emergency_response!(model, gm, participation, reserve, normal, Pg, balance_M)
     inj = Dict{String,Any}()
     for n in gm.buses
         e = AffExpr(0.0)
@@ -541,9 +594,9 @@ end
 # ---------------------------------------------------------------------------
 function _corrective_response(gm, states, monitored, correctives, switchable, contingencies,
                               participation, pst_limits, pst_model, vstar, opt, silent, bigM, balance_M,
-                              bigMs = Dict{String,Float64}())
+                              bigMs = Dict{String,Float64}(), emergency = String[])
     model = Model(opt); silent && set_silent(model)
-    inj_unc, inj_nom, drop_slack = _injection_model!(model, gm, participation, vstar, balance_M)
+    inj_unc, inj_nom, drop_slack = _injection_model!(model, gm, participation, vstar, balance_M; emergency = emergency)
     ranges = Dict(b.id => (b.alpha_min, b.alpha_max) for b in gm.branches if b isa Pst)
     α = Dict{Tuple{String,String},VariableRef}()
     op = Dict{Tuple{String,String},VariableRef}()
@@ -806,14 +859,15 @@ end
 # ---------------------------------------------------------------------------
 function _relaxed_medial(gm, states, monitored, uncertain, correctives, switchable, contingencies,
                          participation, pst_limits, pst_model, candidates, bigM, opt, silent, balance_M,
-                         exchange = nothing, ugens = NamedTuple[], bigMs = Dict{String,Float64}())
+                         exchange = nothing, ugens = NamedTuple[], bigMs = Dict{String,Float64}(),
+                         emergency = String[])
     model = Model(opt); silent && set_silent(model)
     v = _uncertainty_model!(model, uncertain, ugens)
     # Exchange parameterisation: the net injection deviation of a zone is the *exchange*, and the
     # uncertainty is restricted to realisations achieving an exchange in the given range. The
     # per-bus box then bounds how the exchange may be composed, not how large it is.
     _exchange_constraint!(model, v, exchange)
-    inj_unc, inj_nom, drop_slack = _injection_model!(model, gm, participation, v, balance_M)
+    inj_unc, inj_nom, drop_slack = _injection_model!(model, gm, participation, v, balance_M; emergency = emergency)
     @variable(model, η)
     # each candidate corrective response is a fixed menu entry; a binary picks the branch/state
     # that binds, so η is the worst overload the uncertainty can force against that response
@@ -876,6 +930,7 @@ function min_violating_exchange(network;
                                 pst_limits::AbstractDict = Dict{String,Float64}(),
                                 pst_model::AbstractDict = Dict{String,Any}(),
                                 uncertain_generators = NamedTuple[], auto_bigM = true,
+                                emergency = String[],
                                 slack::Union{Nothing,String} = nothing,
                                 optimizer = HiGHS.Optimizer, restriction = 0.0, tol = 1e-5,
                                 direction = -1.0, offset = 0.0,
@@ -905,7 +960,7 @@ function min_violating_exchange(network;
         # transfer runs (−1, the default, is an import by the zone) and `offset` shifts the zero
         # point when the forecast exchange is not itself zero.
         @constraint(model, zone_exchange(v, (buses = zone,)) == direction * E + offset)
-        inj_unc, inj_nom, drop_slack = _injection_model!(model, gm, participation, v, balance_bigM)
+        inj_unc, inj_nom, drop_slack = _injection_model!(model, gm, participation, v, balance_bigM; emergency = emergency)
         for (j, cand) in enumerate(menu)
             sel = VariableRef[]
             _build_program!(model, gm, states, monitored, correctives, switch, pst_limits, pst_model,
@@ -927,7 +982,7 @@ function min_violating_exchange(network;
         # Verify the candidate against the full corrective freedom, not just the menu.
         phi, ac = _corrective_response(gm, states, monitored, correctives, switch, conts,
                                        participation, pst_limits, pst_model, vstar,
-                                       optimizer, silent, bigM, balance_bigM, bigMs)
+                                       optimizer, silent, bigM, balance_bigM, bigMs, emergency)
         phi > -restriction - tol && return (e, vstar)  # genuinely uncorrectable ⇒ the frontier
         push!(menu, ac)                                # correctable ⇒ enrich the menu and retry
     end
@@ -965,6 +1020,9 @@ Besides `uncertain`, `monitored`, `correctives`, `contingencies` and `participat
   `±r`), a `(lower, upper)` pair when the branch is rated differently per flow direction (with
   `lower < 0 < upper`), or a `NamedTuple` `(; base, contingency, corrective)` whose entries are
   themselves numbers or pairs, selecting per-state ratings.
+* `emergency` — generator ids held as **reserve**: they stay at their set point until every other
+  responding generator has reached the bound in the direction the imbalance calls for, and only
+  then respond. Reserve is held back rather than shared, unlike ordinary `participation`.
 * `restriction` — tighten the security test by `ε_R ≥ 0`: the grid counts as secure only with a
   margin, `φ ≤ −ε_R`. A restricted answer is **conservative**, so a configuration it accepts is
   securable with room to spare — the restriction-of-the-right-hand-side idea, used to obtain
@@ -982,6 +1040,7 @@ function worst_case_oracle(network;
                            pst_model::AbstractDict = Dict{String,Any}(),
                            exchange = nothing, restriction = 0.0,
                            uncertain_generators = NamedTuple[], auto_bigM = true,
+                           emergency = String[],
                            slack::Union{Nothing,String} = nothing,
                            optimizer = HiGHS.Optimizer, tol = 1e-5, max_iter = 30,
                            bigM = 1e4, balance_bigM = 1e5, silent = true)
@@ -1013,9 +1072,9 @@ function worst_case_oracle(network;
     # (physical evaluation) agree: a single pass suffices and the reported `φ` is the response value.
     if isempty(correctives) && isempty(switch)
         ub, vstar = _relaxed_medial(gm, states, monitored, uncertain, correctives, switch, conts,
-                                    participation, pst_limits, pst_model, candidates, bigM, optimizer, silent, balance_bigM, exchange, ugens, bigMs)
+                                    participation, pst_limits, pst_model, candidates, bigM, optimizer, silent, balance_bigM, exchange, ugens, bigMs, emergency)
         lb, _ = _corrective_response(gm, states, monitored, correctives, switch, conts,
-                                     participation, pst_limits, pst_model, vstar, optimizer, silent, bigM, balance_bigM, bigMs)
+                                     participation, pst_limits, pst_model, vstar, optimizer, silent, bigM, balance_bigM, bigMs, emergency)
         return WorstCaseSolution(lb, lb <= tol - restriction, vstar,
                                  Dict{String,Dict{String,Float64}}(), 1, lb, ub)
     end
@@ -1023,9 +1082,9 @@ function worst_case_oracle(network;
     for k in 1:max_iter
         iterations = k
         ub, vstar = _relaxed_medial(gm, states, monitored, uncertain, correctives, switch, conts,
-                                    participation, pst_limits, pst_model, candidates, bigM, optimizer, silent, balance_bigM, exchange, ugens, bigMs)
+                                    participation, pst_limits, pst_model, candidates, bigM, optimizer, silent, balance_bigM, exchange, ugens, bigMs, emergency)
         lb, ac = _corrective_response(gm, states, monitored, correctives, switch, conts,
-                                      participation, pst_limits, pst_model, vstar, optimizer, silent, bigM, balance_bigM, bigMs)
+                                      participation, pst_limits, pst_model, vstar, optimizer, silent, bigM, balance_bigM, bigMs, emergency)
         if lb > best_lb
             best_lb = lb
             corrective = ac

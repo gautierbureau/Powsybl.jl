@@ -525,3 +525,36 @@ end
     @test_throws ArgumentError W.worst_case_oracle(build_ext(); uncertain = NO_UNC,
         monitored = Dict("L12a" => (110.0, 220.0)))     # both positive is not a direction pair
 end
+
+@testset "Emergency reserve and merit order" begin
+    # G1 (200 MW, up to 1000) is the ordinary responding unit; G2 (50 MW, up to 150) is held as
+    # reserve. Reserve must stay put while G1 still has headroom, and engage only once it doesn't.
+    mon = Dict("L12a" => 110.0)
+    both = Dict("G1" => 1.0, "G2" => 1.0)
+
+    # 700 MW of extra load is within G1's 800 MW of headroom, so the reserve stays at its set
+    # point and the answer must equal the case where G2 does not participate at all.
+    unc700 = Dict("VL3_0" => (-700.0, 0.0))
+    reserve = W.worst_case_oracle(build_ext(); uncertain = unc700, monitored = mon,
+                                  participation = both, emergency = ["G2"])
+    g1only  = W.worst_case_oracle(build_ext(); uncertain = unc700, monitored = mon,
+                                  participation = Dict("G1" => 1.0))
+    shared  = W.worst_case_oracle(build_ext(); uncertain = unc700, monitored = mon,
+                                  participation = both)
+    @test reserve.phi ≈ g1only.phi atol = 5e-3      # held back: as if it did not respond
+    @test reserve.phi > shared.phi + 0.05           # …and strictly worse than sharing
+
+    # 850 MW exceeds G1's headroom, so the reserve must engage for the case to balance at all.
+    unc850 = Dict("VL3_0" => (-850.0, 0.0))
+    engaged = W.worst_case_oracle(build_ext(); uncertain = unc850, monitored = mon,
+                                  participation = both, emergency = ["G2"])
+    shared850 = W.worst_case_oracle(build_ext(); uncertain = unc850, monitored = mon,
+                                    participation = both)
+    @test isfinite(engaged.phi)
+    @test engaged.phi > reserve.phi                 # a larger deficit is worse
+    @test !isapprox(engaged.phi, shared850.phi; atol = 1e-3)   # reserve last ≠ sharing throughout
+
+    # A 700 MW deficit overloads the corridor however it is covered; sharing merely softens it.
+    @test shared.phi > 0
+    @test g1only.phi > shared.phi
+end
