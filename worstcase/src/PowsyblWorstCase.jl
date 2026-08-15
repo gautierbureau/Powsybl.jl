@@ -235,11 +235,23 @@ end
 
 _active(branches, out) = out === nothing ? branches : filter(b -> b.id != out, branches)
 
-# A monitored limit is either one number for every state, or a per-state NamedTuple.
+# A monitored limit selects by state — one value for every state, or a per-state `NamedTuple`.
 _limit(v::Number, ::State) = v
+_limit(v::Tuple, ::State) = v                                  # a direction pair, same everywhere
 _limit(v::NamedTuple, s::ContingencyState) = get(v, :contingency, v.base)
 _limit(v::NamedTuple, s::CorrectiveState) = get(v, :corrective, v.base)
 _limit(v::NamedTuple, ::State) = v.base
+
+# …and is then read as a pair of **per-direction** ratings `(lower, upper)`, with `lower < 0 < upper`.
+# A plain number `r` is the symmetric pair `(-r, r)`. Dividing the flow by the rating for its own
+# direction makes a violation `ratio > 1` in both cases, since the lower rating is negative.
+_limit_pair(x::Number) = (-abs(float(x)), abs(float(x)))
+function _limit_pair(x::Tuple)
+    lo, hi = float(x[1]), float(x[2])
+    (lo < 0 < hi) || throw(ArgumentError(
+        "a monitored limit pair must be (lower, upper) with lower < 0 < upper; got ($lo, $hi)"))
+    return (lo, hi)
+end
 
 # ---------------------------------------------------------------------------
 # Injection model (secondary frequency response / single slack)
@@ -480,9 +492,9 @@ function _overloads(P, monitored, st::State)
     out = Any[]
     for (id, limspec) in monitored
         haskey(P, id) || continue
-        lim = _limit(limspec, st)
-        push!(out, P[id] / lim - 1)
-        push!(out, -P[id] / lim - 1)
+        lo, hi = _limit_pair(_limit(limspec, st))
+        push!(out, P[id] / hi - 1)     # binds when the flow exceeds its forward rating
+        push!(out, P[id] / lo - 1)     # …and when it exceeds the reverse one (lo < 0)
     end
     return out
 end
@@ -949,6 +961,10 @@ Besides `uncertain`, `monitored`, `correctives`, `contingencies` and `participat
   with the trip propagating forward through the states. Its multiple (locally-consistent)
   equilibria are resolved to the physical one by a connected-reference trip test, so the automaton
   composes with the free `correctives` (the max/min bounds meet).
+* `monitored` — `Dict(branch_id => limit)`. A limit is a plain number `r` (the symmetric rating
+  `±r`), a `(lower, upper)` pair when the branch is rated differently per flow direction (with
+  `lower < 0 < upper`), or a `NamedTuple` `(; base, contingency, corrective)` whose entries are
+  themselves numbers or pairs, selecting per-state ratings.
 * `restriction` — tighten the security test by `ε_R ≥ 0`: the grid counts as secure only with a
   margin, `φ ≤ −ε_R`. A restricted answer is **conservative**, so a configuration it accepts is
   securable with room to spare — the restriction-of-the-right-hand-side idea, used to obtain

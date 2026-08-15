@@ -493,3 +493,35 @@ end
     @test auto.phi ≈ manual.phi atol = 1e-6
     @test W.is_secure(auto) == W.is_secure(manual)
 end
+
+@testset "Asymmetric per-direction limits" begin
+    # A branch may be rated differently each way. Base flow on L12a is positive and reaches
+    # ≈ 140.8 MW under the uncertainty, so only the forward rating can bind here.
+    unc = Dict("VL3_0" => (-200.0, 0.0))
+    sym  = W.worst_case_oracle(build_ext(); uncertain = unc, monitored = Dict("L12a" => 110.0))
+    pair = W.worst_case_oracle(build_ext(); uncertain = unc,
+                               monitored = Dict("L12a" => (-110.0, 110.0)))
+    @test pair.phi ≈ sym.phi atol = 1e-9        # (-r, r) is exactly the symmetric rating
+
+    # Relaxing only the reverse rating changes nothing: the forward one still binds.
+    fwd = W.worst_case_oracle(build_ext(); uncertain = unc,
+                              monitored = Dict("L12a" => (-1e4, 110.0)))
+    @test fwd.phi ≈ sym.phi atol = 1e-9
+    @test !W.is_secure(fwd)
+
+    # Relaxing the forward rating instead leaves the flow unconstrained in the direction it runs.
+    rev = W.worst_case_oracle(build_ext(); uncertain = unc,
+                              monitored = Dict("L12a" => (-110.0, 1e4)))
+    @test W.is_secure(rev)
+    @test rev.phi < sym.phi - 1.0
+
+    # Per-state ratings may be pairs too.
+    perstate = W.worst_case_oracle(build_ext(); uncertain = NO_UNC, contingencies = ["L_B"],
+        monitored = Dict("L12a" => (base = (-110.0, 110.0), contingency = (-1e4, 1e4),
+                                    corrective = (-110.0, 110.0))))
+    @test !W.is_secure(perstate)
+    @test perstate.phi ≈ N1_OVERLOAD atol = 1e-3   # only the post-corrective rating binds
+
+    @test_throws ArgumentError W.worst_case_oracle(build_ext(); uncertain = NO_UNC,
+        monitored = Dict("L12a" => (110.0, 220.0)))     # both positive is not a direction pair
+end
