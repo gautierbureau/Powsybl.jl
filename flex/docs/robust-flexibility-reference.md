@@ -257,27 +257,23 @@ expected values (≈ 354.5 MW in one transfer sense, ≈ 991.0 MW in the other, 
 (`100/x_pu` in MW/rad), all six nodal injections match, and the nominal case balances to exactly
 0.0 MW. Impedances, topology, per-unit scaling and injection signs are therefore all correct.
 
-**The uncertainty model does not yet match, and the benchmark identified precisely why.** We model
-uncertainty as an independent box per bus. The reference couples its uncertain generators: they
-share a *budget*, and a single sign binary forces **all** of them to move in the same direction
-(each offset is bounded by the positive part of the budget, or by the negative part, according to
-that one binary). Independent boxes therefore let the adversary push one uncertain generator to
-`+bound` while pulling another to `−bound`, creating a large internal transfer the reference
-forbids outright.
+**The uncertainty model needed one addition, which the benchmark pinpointed.** We modelled
+uncertainty as an independent box per bus; the reference couples its uncertain generators through a
+shared budget and a single sign, so they all move the same way. Independent boxes therefore allowed
+one generator at `+bound` while another sat at `−bound` — an internal transfer a common-mode
+forecast error cannot produce. A sweep confirmed the diagnosis before the fix: at the reference's
+own setting our frontier collapsed to zero, at a quarter of the freedom the frontiers were finite
+and of the right order, and with it removed nothing violated.
 
-A sweep over that freedom confirms it is the cause: at the reference's own setting our frontier
-collapses to zero (the adversary is simply too strong), at a quarter of it we get finite frontiers
-of the right order, and with the freedom removed nothing violates at all. The dependence is
-monotone and steep, exactly as an over-powerful adversary predicts.
-
-So the next modelling slice is a **coupled uncertain-generation set** — a shared budget with a
-common sign — rather than anything to do with the network or the algorithm.
+With `uncertain_generators` added, **the benchmark reproduces**: all four published maximum
+exchanges — both transfer senses at each of two balancing bounds — match to **0.001 MW**, inside
+the reference's own 1e-4 pu tolerance. It is now a regression test.
 
 ## Gaps / roadmap (highest leverage first)
 
-1. **Coupled uncertain generation** — a shared budget across the uncertain generators with a
-   single common sign, as above. This is what currently blocks numeric agreement on the six-bus
-   benchmark, and it is the last piece needed to reproduce its published values.
+1. **Bound tightening** — our big-M constants are hand-tuned and have already collided with a
+   model parameter once. The reference computes them. This is now the main obstacle to running on
+   networks larger than the benchmark.
 2. **Two-sided bounding + worst-case-generation certificate** — replace our plain bisection with a
    lower/upper bounding pair (the RRHS restriction gives the conservative side, via
    `SemiInfinite.solve_rrhs`), and add a final worst-case-generation pass that certifies the
