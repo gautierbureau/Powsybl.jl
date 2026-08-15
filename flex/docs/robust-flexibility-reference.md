@@ -286,9 +286,8 @@ constant it replaces, and the benchmark reproduces with no hand-tuned setting.
 
 ## Gaps / roadmap (highest leverage first)
 
-1. **Merit-order and emergency generators** — the reference's balancing has generators reaching
-   their bounds in a fixed order, and reserve units that inject only once the others are capped.
-   Ours is participation with saturation.
+1. **Discrete-tap phase shifters** — the reference has a discrete-tap variant alongside the
+   continuous one; ours is continuous only.
 2. **Two-sided bounding + worst-case-generation certificate** — replace our plain bisection with a
    lower/upper bounding pair (the RRHS restriction gives the conservative side, via
    `SemiInfinite.solve_rrhs`), and add a final worst-case-generation pass that certifies the
