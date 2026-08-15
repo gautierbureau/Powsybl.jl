@@ -37,6 +37,7 @@ using Powsybl
 using JuMP
 import HiGHS
 import DataFrames
+using LinearAlgebra: inv
 
 const NET = Powsybl.Network
 
@@ -305,9 +306,12 @@ struct StateBuilder
     inj::AbstractDict
     drop_slack::Bool
     M::Float64
+    bigMs::Dict{String,Float64}     # per-branch, from the physics; falls back to `M`
     tag::String
     memo::Dict{Any,Any}
 end
+
+_M(sb::StateBuilder, br::Branch) = get(sb.bigMs, br.id, sb.M)
 
 _dθ(br::Branch, θ) = θ[br.bus1] - θ[br.bus2]
 _is_automaton(sb::StateBuilder, br::Branch) = br isa Pst && haskey(sb.pst_model, br.id)
@@ -318,7 +322,7 @@ function _flow!(model, br::Line, θ, sb::StateBuilder)
 end
 
 _flow!(model, br::Hvdc, θ, sb::StateBuilder) =
-    _clamp!(model, br.p_zero + br.k * _dθ(br, θ), -br.p_lim, br.p_lim, sb.M)
+    _clamp!(model, br.p_zero + br.k * _dθ(br, θ), -br.p_lim, br.p_lim, _M(sb, br))
 
 function _flow!(model, br::Pst, θ, sb::StateBuilder)
     _is_automaton(sb, br) && return _automaton_flow!(model, br, θ, sb.st, sb, sb.pst_model[br.id])
@@ -328,7 +332,7 @@ end
 # A PST held at a given angle, optionally switchable: `open` is `nothing` (no switching), a
 # `Bool` (a fixed candidate) or a binary variable.
 function _switchable_pst_flow!(model, br::Pst, θ, sb::StateBuilder)
-    open = sb.open_of(br.id); plim = sb.plim_of(br.id, open); M = sb.M
+    open = sb.open_of(br.id); plim = sb.plim_of(br.id, open); M = _M(sb, br)
     nat = br.h * (_dθ(br, θ) + sb.angle_of(br.id))
     if open === nothing
         p = @variable(model); @constraint(model, p == nat); return p
@@ -434,20 +438,20 @@ end
 
 # Nominal: the device is inactive at α⁰; it may still trip on over-current.
 function _automaton_flow!(model, br::Pst, θ, ::NominalState, sb::StateBuilder, fp)
-    P, _ = _inactive_flow!(model, br, _dθ(br, θ), fp.p_lim, sb.M, _pref(sb, br))
+    P, _ = _inactive_flow!(model, br, _dθ(br, θ), fp.p_lim, _M(sb, br), _pref(sb, br))
     return P
 end
 
 # Base (N): as nominal, but a trip here is inherited by every later state.
 function _automaton_flow!(model, br::Pst, θ, ::BaseState, sb::StateBuilder, fp)
-    P, conn = _inactive_flow!(model, br, _dθ(br, θ), fp.p_lim, sb.M, _pref(sb, br))
+    P, conn = _inactive_flow!(model, br, _dθ(br, θ), fp.p_lim, _M(sb, br), _pref(sb, br))
     sb.memo[(:conn_N, br.id)] = conn
     return P
 end
 
 # Post-contingency (N-1): still inactive at α⁰, cannot reconnect if it tripped in N.
 function _automaton_flow!(model, br::Pst, θ, st::ContingencyState, sb::StateBuilder, fp)
-    P, conn = _inactive_flow!(model, br, _dθ(br, θ), fp.p_lim, sb.M, _pref(sb, br);
+    P, conn = _inactive_flow!(model, br, _dθ(br, θ), fp.p_lim, _M(sb, br), _pref(sb, br);
                               conn_max = sb.memo[(:conn_N, br.id)])
     sb.memo[(:conn_N1, br.id, st.outage)] = conn
     sb.memo[(:P_N1, br.id, st.outage)] = P
@@ -457,7 +461,7 @@ end
 # Post-corrective (N-1/c): the device activates once |P^{N-1}| ≥ P^act and then regulates toward
 # ±P^tar; otherwise it stays inactive at α⁰. Either way a trip inherited from N-1 keeps it open.
 function _automaton_flow!(model, br::Pst, θ, st::CorrectiveState, sb::StateBuilder, fp)
-    M = sb.M; Δθ = _dθ(br, θ); p_ref = _pref(sb, br)
+    M = _M(sb, br); Δθ = _dθ(br, θ); p_ref = _pref(sb, br)
     conn_N1 = sb.memo[(:conn_N1, br.id, st.outage)]
     P_N1 = sb.memo[(:P_N1, br.id, st.outage)]
     P_ia, _ = _inactive_flow!(model, br, Δθ, fp.p_lim, M, p_ref; conn_max = conn_N1)
@@ -497,7 +501,7 @@ _plim_of(pst_limits) = (pst_id, open) -> (open === nothing ? Inf : get(pst_limit
 # ---------------------------------------------------------------------------
 function _build_program!(model, gm, states, monitored, correctives, switchable, pst_limits,
                          pst_model, inj_unc, inj_nom, drop_slack, M, tag_prefix,
-                         corr_angle, corr_open, on_overload)
+                         corr_angle, corr_open, on_overload; bigMs = Dict{String,Float64}())
     a0 = _pst_alpha0(gm)
     plim_of = _plim_of(pst_limits)
     memo = Dict{Any,Any}()
@@ -512,7 +516,7 @@ function _build_program!(model, gm, states, monitored, correctives, switchable, 
         end
         open_of = pid -> (cf !== nothing && pid in switchable ? corr_open(pid, cf) : nothing)
         sb = StateBuilder(gm, st, angle_of, open_of, plim_of, pst_model,
-                          has_uncertainty(st) ? inj_unc : inj_nom, drop_slack, M,
+                          has_uncertainty(st) ? inj_unc : inj_nom, drop_slack, M, bigMs,
                           "$(tag_prefix)$(statename(st))", memo)
         for o in _overloads(_add_state!(model, sb), monitored, st)
             on_overload(o)
@@ -524,7 +528,8 @@ end
 # Corrective-response problem (LLP)
 # ---------------------------------------------------------------------------
 function _corrective_response(gm, states, monitored, correctives, switchable, contingencies,
-                              participation, pst_limits, pst_model, vstar, opt, silent, bigM, balance_M)
+                              participation, pst_limits, pst_model, vstar, opt, silent, bigM, balance_M,
+                              bigMs = Dict{String,Float64}())
     model = Model(opt); silent && set_silent(model)
     inj_unc, inj_nom, drop_slack = _injection_model!(model, gm, participation, vstar, balance_M)
     ranges = Dict(b.id => (b.alpha_min, b.alpha_max) for b in gm.branches if b isa Pst)
@@ -542,13 +547,168 @@ function _corrective_response(gm, states, monitored, correctives, switchable, co
                     inj_unc, inj_nom, drop_slack, bigM, "",
                     (pid, c) -> get(α, (pid, c), nothing),
                     (pid, c) -> get(op, (pid, c), nothing),
-                    o -> @constraint(model, η >= o))
+                    o -> @constraint(model, η >= o); bigMs = bigMs)
     @objective(model, Min, η)
     optimize!(model)
     ac = Dict((pid, c) => (alpha = value(α[(pid, c)]),
                            open = haskey(op, (pid, c)) ? value(op[(pid, c)]) > 0.5 : false)
               for c in contingencies, pid in correctives)
     return objective_value(model), ac
+end
+
+# ---------------------------------------------------------------------------
+# Per-branch big-M bounds
+#
+# Every disjunction here (a clamp, a trip, an activation) needs a constant large enough to make
+# its inactive side vacuous. A single hand-picked constant is both unsafe — too small silently
+# yields wrong answers — and wasteful, since a loose big-M weakens the relaxation the solver
+# works with. It has already collided with a model parameter once.
+#
+# Instead, bound each branch flow from the physics. In the DC model
+#
+#     P = PTDF · injection + PSDF · α
+#
+# so `|P_e| ≤ Σ_n |PTDF_{e,n}|·M_n + Σ_p |PSDF_{e,p}|·max|α_p|`, where `M_n` bounds the injection
+# at bus `n` using its generator limits, its load and its share of the uncertainty. The result is
+# rigorous, per-branch (so far tighter than one global constant), and closed-form — no solve, so
+# it cannot fail or time out. It is evaluated for every topology (intact and each outage) and,
+# where an HVDC is present, for both of its regimes, taking the largest.
+# ---------------------------------------------------------------------------
+_susceptance(br::Line) = br.h
+_susceptance(br::Pst)  = br.h
+_susceptance(br::Hvdc) = br.k
+
+# Largest injection magnitude each bus can reach.
+function _injection_bounds(gm, uncertain, ugens, participation)
+    out = Dict{String,Float64}()
+    for n in gm.buses
+        lo = -get(gm.load_by_bus, n, 0.0); hi = lo
+        for g in gm.generators
+            g.bus == n || continue
+            if participation !== nothing && haskey(participation, g.id)
+                lo += g.pmin; hi += g.pmax          # free to respond within its limits
+            else
+                lo += g.p0;   hi += g.p0            # held at its set point
+            end
+        end
+        if haskey(uncertain, n)
+            lo += uncertain[n][1]; hi += uncertain[n][2]
+        end
+        for g in ugens
+            g.bus == n || continue
+            cl, ch = _ug_range(g, :controllable); ul, uh = _ug_range(g, :uncontrollable)
+            lo += min(cl, 0.0) + ul; hi += max(ch, 0.0) + uh
+        end
+        out[n] = max(abs(lo), abs(hi))
+    end
+    return out
+end
+
+# Reduced inverse of the bus susceptance matrix; `nothing` if the topology is degenerate.
+function _bus_reactance(gm, active)
+    N = length(gm.buses); idx = Dict(b => i for (i, b) in enumerate(gm.buses))
+    B = zeros(N, N)
+    for br in active
+        h = _susceptance(br); i = idx[br.bus1]; j = idx[br.bus2]
+        B[i, i] += h; B[j, j] += h; B[i, j] -= h; B[j, i] -= h
+    end
+    si = idx[gm.slack]; keep = [i for i in 1:N if i != si]
+    isempty(keep) && return nothing, idx
+    X = zeros(N, N)
+    try
+        X[keep, keep] = inv(B[keep, keep])
+    catch
+        return nothing, idx
+    end
+    all(isfinite, X) || return nothing, idx
+    return X, idx
+end
+
+# Bounds are computed for *every* branch, not only the ones carrying flow: a branch that is out
+# or tripped still appears in the model through its would-be flow `h·(Δθ + α)`, which the
+# surrounding topology determines and which the disjunctions compare against.
+function _flow_bounds(gm, active, Mn, X, idx)
+    ptdf(e, n) = _susceptance(e) * (X[idx[e.bus1], n] - X[idx[e.bus2], n])
+    live = Set(br.id for br in active)
+    psts = [br for br in active if br isa Pst]
+    out = Dict{String,Float64}()
+    for e in gm.branches
+        b = 0.0
+        for (n, bus) in enumerate(gm.buses)
+            b += abs(ptdf(e, n)) * get(Mn, bus, 0.0)
+        end
+        for p in psts
+            amax = max(abs(p.alpha_min), abs(p.alpha_max))
+            amax == 0.0 && continue
+            psdf = -_susceptance(p) * (ptdf(e, idx[p.bus1]) - ptdf(e, idx[p.bus2])) +
+                   (e.id == p.id ? _susceptance(p) : 0.0)
+            b += abs(psdf) * amax
+        end
+        if e isa Pst && !(e.id in live)          # its own shift still offsets the would-be flow
+            b += _susceptance(e) * max(abs(e.alpha_min), abs(e.alpha_max))
+        end
+        out[e.id] = b
+    end
+    return out
+end
+
+# The device limits a branch's own disjunctions compare against.
+function _device_limit(br::Branch, pst_limits, pst_model)
+    br isa Hvdc && return isfinite(br.p_lim) ? br.p_lim : 0.0
+    br isa Pst || return 0.0
+    d = get(pst_limits, br.id, 0.0)
+    isfinite(d) || (d = 0.0)
+    if haskey(pst_model, br.id)
+        fp = pst_model[br.id]
+        d = max(d, maximum(x -> isfinite(x) ? x : 0.0, (fp.p_lim, fp.p_act, fp.p_tar)))
+    end
+    return d
+end
+
+"""
+    branch_bigM(gm, contingencies; uncertain, ugens, participation, pst_limits, pst_model, cap)
+
+Per-branch big-M constants derived from the DC physics (see above). `cap` bounds the result, for
+callers that want to keep a ceiling. The factor of two covers constraints that compare two bounded
+quantities (a flow against its would-be value, or against a device limit).
+"""
+function branch_bigM(gm, conts; uncertain = Dict{String,Tuple{Float64,Float64}}(),
+                     ugens = NamedTuple[], participation = nothing,
+                     pst_limits = Dict{String,Float64}(), pst_model = Dict{String,Any}(),
+                     cap = Inf)
+    Mn = _injection_bounds(gm, uncertain, ugens, participation)
+    hvdcs = [br for br in gm.branches if br isa Hvdc]
+    # A PST that can trip changes the topology too, so bound against those networks as well.
+    trippable = Any[nothing]
+    for br in gm.branches
+        br isa Pst || continue
+        (haskey(pst_model, br.id) || haskey(pst_limits, br.id)) && push!(trippable, br.id)
+    end
+    bounds = Dict{String,Float64}()
+    for out in vcat(Any[nothing], Any[c for c in conts]), gone in trippable
+        active = _active(_active(gm.branches, out), gone)
+        regimes = isempty(hvdcs) ? (:emulating,) : (:emulating, :clamped)
+        for regime in regimes
+            act = regime === :emulating ? active : filter(b -> !(b isa Hvdc), active)
+            Mn2 = Mn
+            if regime === :clamped
+                Mn2 = copy(Mn)                       # a clamped link is a fixed injection pair
+                for h in hvdcs
+                    lim = isfinite(h.p_lim) ? h.p_lim : 0.0
+                    Mn2[h.bus1] = get(Mn2, h.bus1, 0.0) + lim
+                    Mn2[h.bus2] = get(Mn2, h.bus2, 0.0) + lim
+                end
+            end
+            X, idx = _bus_reactance(gm, act)
+            X === nothing && continue
+            for (id, v) in _flow_bounds(gm, act, Mn2, X, idx)
+                bounds[id] = max(get(bounds, id, 0.0), v)
+            end
+        end
+    end
+    return Dict(br.id => min(cap, 2 * (get(bounds, br.id, 0.0) +
+                                       _device_limit(br, pst_limits, pst_model)) + 1.0)
+                for br in gm.branches)
 end
 
 # ---------------------------------------------------------------------------
@@ -634,7 +794,7 @@ end
 # ---------------------------------------------------------------------------
 function _relaxed_medial(gm, states, monitored, uncertain, correctives, switchable, contingencies,
                          participation, pst_limits, pst_model, candidates, bigM, opt, silent, balance_M,
-                         exchange = nothing, ugens = NamedTuple[])
+                         exchange = nothing, ugens = NamedTuple[], bigMs = Dict{String,Float64}())
     model = Model(opt); silent && set_silent(model)
     v = _uncertainty_model!(model, uncertain, ugens)
     # Exchange parameterisation: the net injection deviation of a zone is the *exchange*, and the
@@ -654,7 +814,7 @@ function _relaxed_medial(gm, states, monitored, uncertain, correctives, switchab
                         function (o)
                             b = @variable(model, binary = true); push!(sel, b)
                             @constraint(model, η <= o + bigM * (1 - b))
-                        end)
+                        end; bigMs = bigMs)
         @constraint(model, sum(sel) == 1)
     end
     @objective(model, Max, η)
@@ -703,7 +863,7 @@ function min_violating_exchange(network;
                                 hvdc = NamedTuple[], switchable = String[],
                                 pst_limits::AbstractDict = Dict{String,Float64}(),
                                 pst_model::AbstractDict = Dict{String,Any}(),
-                                uncertain_generators = NamedTuple[],
+                                uncertain_generators = NamedTuple[], auto_bigM = true,
                                 slack::Union{Nothing,String} = nothing,
                                 optimizer = HiGHS.Optimizer, restriction = 0.0, tol = 1e-5,
                                 direction = -1.0, offset = 0.0,
@@ -718,6 +878,9 @@ function min_violating_exchange(network;
     states = _states(conts)
     zone = collect(String, zone)
     ugens = collect(uncertain_generators)
+    bigMs = auto_bigM ? branch_bigM(gm, conts; uncertain = uncertain, ugens = ugens,
+                                    participation = participation, pst_limits = pst_limits,
+                                    pst_model = pst_model) : Dict{String,Float64}()
 
     Cand = Dict{Tuple{String,String},NamedTuple{(:alpha, :open),Tuple{Float64,Bool}}}
     menu = Cand[Cand()]
@@ -740,7 +903,7 @@ function min_violating_exchange(network;
                             function (o)
                                 b = @variable(model, binary = true); push!(sel, b)
                                 @constraint(model, o >= -restriction - bigM * (1 - b))
-                            end)
+                            end; bigMs = bigMs)
             @constraint(model, sum(sel) == 1)      # this response must leave some branch violated
         end
         @objective(model, Min, E)
@@ -752,7 +915,7 @@ function min_violating_exchange(network;
         # Verify the candidate against the full corrective freedom, not just the menu.
         phi, ac = _corrective_response(gm, states, monitored, correctives, switch, conts,
                                        participation, pst_limits, pst_model, vstar,
-                                       optimizer, silent, bigM, balance_bigM)
+                                       optimizer, silent, bigM, balance_bigM, bigMs)
         phi > -restriction - tol && return (e, vstar)  # genuinely uncorrectable ⇒ the frontier
         push!(menu, ac)                                # correctable ⇒ enrich the menu and retry
     end
@@ -802,7 +965,7 @@ function worst_case_oracle(network;
                            hvdc = NamedTuple[], switchable = String[], pst_limits::AbstractDict = Dict{String,Float64}(),
                            pst_model::AbstractDict = Dict{String,Any}(),
                            exchange = nothing, restriction = 0.0,
-                           uncertain_generators = NamedTuple[],
+                           uncertain_generators = NamedTuple[], auto_bigM = true,
                            slack::Union{Nothing,String} = nothing,
                            optimizer = HiGHS.Optimizer, tol = 1e-5, max_iter = 30,
                            bigM = 1e4, balance_bigM = 1e5, silent = true)
@@ -815,6 +978,9 @@ function worst_case_oracle(network;
     switch = Set(collect(String, switchable))
     states = _states(conts)
     ugens = collect(uncertain_generators)
+    bigMs = auto_bigM ? branch_bigM(gm, conts; uncertain = uncertain, ugens = ugens,
+                                    participation = participation, pst_limits = pst_limits,
+                                    pst_model = pst_model) : Dict{String,Float64}()
 
     Cand = Dict{Tuple{String,String},NamedTuple{(:alpha, :open),Tuple{Float64,Bool}}}
     candidates = Cand[Cand()]
@@ -831,9 +997,9 @@ function worst_case_oracle(network;
     # (physical evaluation) agree: a single pass suffices and the reported `φ` is the response value.
     if isempty(correctives) && isempty(switch)
         ub, vstar = _relaxed_medial(gm, states, monitored, uncertain, correctives, switch, conts,
-                                    participation, pst_limits, pst_model, candidates, bigM, optimizer, silent, balance_bigM, exchange, ugens)
+                                    participation, pst_limits, pst_model, candidates, bigM, optimizer, silent, balance_bigM, exchange, ugens, bigMs)
         lb, _ = _corrective_response(gm, states, monitored, correctives, switch, conts,
-                                     participation, pst_limits, pst_model, vstar, optimizer, silent, bigM, balance_bigM)
+                                     participation, pst_limits, pst_model, vstar, optimizer, silent, bigM, balance_bigM, bigMs)
         return WorstCaseSolution(lb, lb <= tol - restriction, vstar,
                                  Dict{String,Dict{String,Float64}}(), 1, lb, ub)
     end
@@ -841,9 +1007,9 @@ function worst_case_oracle(network;
     for k in 1:max_iter
         iterations = k
         ub, vstar = _relaxed_medial(gm, states, monitored, uncertain, correctives, switch, conts,
-                                    participation, pst_limits, pst_model, candidates, bigM, optimizer, silent, balance_bigM, exchange, ugens)
+                                    participation, pst_limits, pst_model, candidates, bigM, optimizer, silent, balance_bigM, exchange, ugens, bigMs)
         lb, ac = _corrective_response(gm, states, monitored, correctives, switch, conts,
-                                      participation, pst_limits, pst_model, vstar, optimizer, silent, bigM, balance_bigM)
+                                      participation, pst_limits, pst_model, vstar, optimizer, silent, bigM, balance_bigM, bigMs)
         if lb > best_lb
             best_lb = lb
             corrective = ac

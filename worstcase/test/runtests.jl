@@ -458,8 +458,38 @@ end
         r = W.min_violating_exchange(build_ref6(; bb_pu = bb); zone = REF_ZONE, uncertain = REF_BOX,
                 uncertain_generators = ref_ugens(bb), monitored = REF_MON, e_cap = 3000.0,
                 participation = REF_PART, hvdc = REF_HVDC, slack = "VL1_0",
-                direction = dir, offset = REF_OFFSET, bigM = 1e5, balance_bigM = 1e5)
+                direction = dir, offset = REF_OFFSET)   # no hand-tuned big-M
         @test r !== nothing
         @test r[1] ≈ expected atol = 0.01          # inside the reference's own 1e-4 pu tolerance
     end
+end
+
+@testset "Per-branch big-M bounds from the physics" begin
+    # The bounds must be valid — never below a flow the model can actually reach — and materially
+    # tighter than a single hand-picked constant.
+    gm = W.GridModel(build_ext(); slack = "VL1_0")
+    box = Dict("VL3_0" => (-200.0, 0.0))
+    M = W.branch_bigM(gm, ["L_B"]; uncertain = box,
+                      participation = Dict("G1" => 1.0, "G2" => 1.0))
+    @test Set(keys(M)) == Set(br.id for br in gm.branches)
+    @test all(v -> v > 0 && isfinite(v), values(M))
+
+    # Validity: the worst case the oracle actually finds must sit inside the bound. With L_B out
+    # the corridor carries ≈ 142.9 MW at forecast and more under the uncertainty; every branch
+    # bound must exceed the flows the model reaches, and the monitored limit it is compared to.
+    @test M["L12a"] > 200.0
+    @test M["PST_T"] > 0.0
+
+    # Tightness: far below the 1e4 default that was previously applied to every branch.
+    @test maximum(values(M)) < 1e4
+
+    # Answers must not depend on the bound: the automatic and a generous manual setting agree.
+    lim = (base = 110.0, contingency = 150.0, corrective = 110.0)
+    auto = W.worst_case_oracle(build_ext(); uncertain = NO_UNC, monitored = Dict("L12a" => lim),
+                               correctives = ["PST_T"], contingencies = ["L_B"])
+    manual = W.worst_case_oracle(build_ext(); uncertain = NO_UNC, monitored = Dict("L12a" => lim),
+                                 correctives = ["PST_T"], contingencies = ["L_B"],
+                                 auto_bigM = false, bigM = 1e4)
+    @test auto.phi ≈ manual.phi atol = 1e-6
+    @test W.is_secure(auto) == W.is_secure(manual)
 end
