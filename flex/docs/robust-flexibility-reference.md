@@ -142,9 +142,21 @@ appears in the solver loop):
   which brackets the search range (see *Copper-plate* above).
 * **`filter`** — monitored-line screening ("check if given monitored lines have potential for
   having a violation"). It maximises the largest flow/limit ratio over the **OBBT-relaxed** grid,
-  across all three cases and both directions. Being computed on the relaxed grid it is
-  deliberately conservative, so a monitored line whose ratio cannot reach 1 can never be violated
-  and may be dropped — shrinking the expensive MILPs that follow.
+  across all three cases and both directions, picking the argmax with a one-hot binary. Being
+  computed on the relaxed grid it is deliberately conservative, so a monitored line whose ratio
+  cannot reach 1 can never be violated and may be dropped — shrinking the expensive MILPs that
+  follow. Its big-M needs care and the file says why: against a reverse rating of `−0.1` and a
+  forward one of `10`, a flow of 20 gives ratios of `−200` and `2`, and a big-M of 150 silently
+  breaks the disjunction. They take `max(25, max_limit / min_limit)`.
+
+  `PowsyblWorstCase.screen_monitored` is our version, and it needs no solve at all: the per-branch
+  flow bounds (below) already over-estimate what a branch can carry, so comparing that bound with
+  the rating in each state settles it. Theirs is one MILP over the whole grid and so captures the
+  coupling between branches; ours lets each bus take its worst value independently and is looser
+  there, but enumerates contingency topologies explicitly rather than collapsing them into one
+  generic post-contingency case, and is tighter there. Both are sound — ours simply drops somewhat
+  fewer branches, for no cost — and ours decides per branch by construction, where the shipped
+  binary reports a single ratio for the whole set.
 
 **The iteration itself** uses the two outer levels plus **three MLP-shaped programs**:
 
@@ -321,16 +333,13 @@ The model-fidelity list is now closed: per-direction ratings, coupled uncertain 
 merit-order balancing with emergency reserve, discrete taps and border-inclusive activation are all
 covered, and the six-bus benchmark reproduces exactly. What is left is performance and scope:
 
-1. **Monitored-line screening** (the reference's `filter` step) — drop from the model any branch
-   whose flow bound already proves it cannot bind. The per-branch PTDF bounds above are exactly the
-   quantity this needs, so it is now unblocked and is the largest remaining size reduction.
-2. **Jointly optimising the preventive actions `x`** (`solve_esip_bnf` as the outer driver) — the
+1. **Jointly optimising the preventive actions `x`** (`solve_esip_bnf` as the outer driver) — the
    only level still missing entirely. It is disabled in the reference too, so treat it as
    exploratory rather than parity work.
-3. **Racing the two bounding legs** — `exchange_bracket` runs them in sequence; the reference runs
+2. **Racing the two bounding legs** — `exchange_bracket` runs them in sequence; the reference runs
    `aux` and `mlp` concurrently and lets the first to settle the step abort the other. Pure
    wall-clock, and it cannot change the answer, so it is worth doing only once the model size is
    settled.
-4. A **corrective line automaton** as a device type, **per-tap admittance** (we keep the susceptance
+3. A **corrective line automaton** as a device type, **per-tap admittance** (we keep the susceptance
    tap-independent), and **several cascading full shifters within one state** — scope extensions
    rather than fidelity gaps on the cases we model today.

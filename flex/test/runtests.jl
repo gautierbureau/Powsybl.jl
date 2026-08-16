@@ -235,3 +235,19 @@ end
     @test_throws ArgumentError certifying_scenario(net(); zone = ["VL2_0"], box = box,
                                                    monitored = mon, emax = 50.0, extension = -1.0)
 end
+
+@testset "Monitored screening reaches the search unchanged" begin
+    # `screen = true` is forwarded to the oracle like any other keyword, so every entry point here
+    # inherits it. Dropping branches that cannot fail must not move any reported answer.
+    box = Dict("VL2_0" => (-1000.0, 0.0))
+    mon = Dict{String,Any}("L12" => 150.0)     # the corridor's only branch, and it can bind
+    net() = build_corridor(; g1max = 300.0)
+
+    @test max_exchange(net(); zone = ["VL2_0"], box = box, monitored = mon, screen = true).emax ≈
+          max_exchange(net(); zone = ["VL2_0"], box = box, monitored = mon).emax atol = 1e-6
+    @test certifying_scenario(net(); zone = ["VL2_0"], box = box, monitored = mon,
+                              emax = 50.0, screen = true).clear
+    b = exchange_bracket(net(); zone = ["VL2_0"], box = box, monitored = mon, tol = 0.5,
+                         screen = true)
+    @test b.lower <= 50.0 <= b.upper
+end

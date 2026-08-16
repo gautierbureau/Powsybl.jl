@@ -173,7 +173,7 @@ r.worst_injection  # the binding worst-case injection y*
 ```
 
 Any further keyword (`correctives`, `contingencies`, `hvdc`, `switchable`, `pst_limits`,
-`pst_model`, `bigM`, …) is forwarded to
+`pst_model`, `screen`, `bigM`, …) is forwarded to
 [`PowsyblWorstCase.worst_case_oracle`](../worstcase), so flexibility can be measured against the
 four-state model with correctives, integer-mode devices, and the full PST automaton.
 
