@@ -42,7 +42,7 @@ using LinearAlgebra: inv
 const NET = Powsybl.Network
 
 export GridModel, WorstCaseSolution, Binding, worst_case_oracle, is_secure, zone_exchange,
-       min_violating_exchange
+       min_violating_exchange, screen_monitored, flow_bounds
 
 # ---------------------------------------------------------------------------
 # Branches (lines, PSTs, HVDC) and generators
@@ -799,16 +799,15 @@ function _device_limit(br::Branch, pst_limits, pst_model)
 end
 
 """
-    branch_bigM(gm, contingencies; uncertain, ugens, participation, pst_limits, pst_model, cap)
+    flow_bounds(gm, contingencies; uncertain, ugens, participation, pst_limits, pst_model)
 
-Per-branch big-M constants derived from the DC physics (see above). `cap` bounds the result, for
-callers that want to keep a ceiling. The factor of two covers constraints that compare two bounded
-quantities (a flow against its would-be value, or against a device limit).
+An upper bound on `|P_e|` for every branch, from the DC physics (see above) — evaluated over every
+reachable topology and valid whatever the uncertainty does. The big-M constants and the monitored
+screen are both read off it.
 """
-function branch_bigM(gm, conts; uncertain = Dict{String,Tuple{Float64,Float64}}(),
+function flow_bounds(gm, conts; uncertain = Dict{String,Tuple{Float64,Float64}}(),
                      ugens = NamedTuple[], participation = nothing,
-                     pst_limits = Dict{String,Float64}(), pst_model = Dict{String,Any}(),
-                     cap = Inf)
+                     pst_limits = Dict{String,Float64}(), pst_model = Dict{String,Any}())
     Mn = _injection_bounds(gm, uncertain, ugens, participation)
     hvdcs = [br for br in gm.branches if br isa Hvdc]
     # A PST that can trip changes the topology too, so bound against those networks as well.
@@ -839,9 +838,82 @@ function branch_bigM(gm, conts; uncertain = Dict{String,Tuple{Float64,Float64}}(
             end
         end
     end
-    return Dict(br.id => min(cap, 2 * (get(bounds, br.id, 0.0) +
-                                       _device_limit(br, pst_limits, pst_model)) + 1.0)
+    return Dict(br.id => get(bounds, br.id, 0.0) + _device_limit(br, pst_limits, pst_model)
                 for br in gm.branches)
+end
+
+"""
+    branch_bigM(gm, contingencies; uncertain, ugens, participation, pst_limits, pst_model, cap)
+
+Per-branch big-M constants derived from the DC physics (see above). `cap` bounds the result, for
+callers that want to keep a ceiling. The factor of two covers constraints that compare two bounded
+quantities (a flow against its would-be value, or against a device limit).
+"""
+branch_bigM(gm, conts; cap = Inf, kwargs...) =
+    Dict(id => min(cap, 2 * b + 1.0) for (id, b) in flow_bounds(gm, conts; kwargs...))
+
+# ---------------------------------------------------------------------------
+# Monitored-branch screening
+#
+# Model size grows linearly in the monitored set: every monitored branch contributes two overload
+# expressions per state, and in the medial each of those carries a selection binary. On a real
+# network most monitored branches are nowhere near their rating in any state, and carrying them
+# costs binaries for nothing.
+#
+# The flow bounds above settle it without a solve. They over-estimate the true flow, so a branch
+# whose bound cannot reach its rating can never be the one that fails, in any state, under any
+# uncertainty — and may be dropped outright.
+#
+# What this preserves *exactly*: the security verdict, and the frontier `min_violating_exchange`
+# reports, since neither depends on branches that cannot fail. What it does **not** preserve is the
+# value of `φ` on a comfortably secure grid: if the dropped branch happened to be the least slack
+# one, the reported `φ` falls to the next. That is why it is opt-in rather than automatic.
+# ---------------------------------------------------------------------------
+"""
+    screen_monitored(gm, monitored, contingencies; restriction = 0.0, kwargs...) -> (kept, dropped)
+
+Split `monitored` into the branches that could bind and those that provably cannot, by comparing
+each branch's [`flow_bounds`](@ref) bound against its rating in every state.
+
+A branch counts as failing once its flow reaches `(1 − restriction)` times its rating, so a
+positive `restriction` (a demanded margin) makes failure easier and drops fewer branches — the
+screen follows the same convention as the rest of the package.
+
+The kept set is never empty: if every branch clears its rating the one with the least slack is
+retained, so the reported `φ` still refers to something. Keywords beyond `restriction` are those of
+[`flow_bounds`](@ref).
+"""
+function screen_monitored(gm::GridModel, monitored::AbstractDict, contingencies;
+                          restriction = 0.0, kwargs...)
+    conts = collect(String, contingencies)
+    bounds = flow_bounds(gm, conts; kwargs...)
+    states = _states(conts)
+    thr = 1 - restriction
+    kept = empty(monitored)
+    dropped = String[]
+    slack = Dict{String,Float64}()          # bound / rating: the closest any state gets to failing
+    for (id, limspec) in monitored
+        b = get(bounds, id, Inf)
+        worst = 0.0
+        for st in states
+            lo, hi = _limit_pair(_limit(limspec, st))
+            lim = min(hi, abs(lo))
+            lim > 0 && (worst = max(worst, b / lim))
+        end
+        slack[id] = worst
+        # strict, with a relative guard: never drop on a knife edge
+        if worst <= thr * (1 - 1e-9)
+            push!(dropped, id)
+        else
+            kept[id] = limspec
+        end
+    end
+    if isempty(kept) && !isempty(monitored)
+        keep = argmax(slack)                # the least slack branch stays, so φ keeps a referent
+        kept[keep] = monitored[keep]
+        filter!(!isequal(keep), dropped)
+    end
+    return kept, sort!(dropped)
 end
 
 # ---------------------------------------------------------------------------
@@ -1020,7 +1092,7 @@ function min_violating_exchange(network;
                                 emergency = String[], discrete = String[],
                                 slack::Union{Nothing,String} = nothing,
                                 optimizer = HiGHS.Optimizer, restriction = 0.0, tol = 1e-5,
-                                direction = -1.0, offset = 0.0,
+                                direction = -1.0, offset = 0.0, screen = false,
                                 max_iter = 30, bigM = 1e4, balance_bigM = 1e5, silent = true)
     gm = GridModel(network; slack = slack)
     for h in hvdc
@@ -1028,6 +1100,12 @@ function min_violating_exchange(network;
     end
     _check_monitored(gm, monitored)
     conts = collect(String, contingencies)
+    if screen
+        monitored, _ = screen_monitored(gm, monitored, conts; restriction = restriction,
+                                        uncertain = uncertain, ugens = collect(uncertain_generators),
+                                        participation = participation, pst_limits = pst_limits,
+                                        pst_model = pst_model)
+    end
     correctives = collect(String, correctives)
     switch = Set(collect(String, switchable))
     states = _states(conts)
@@ -1119,6 +1197,9 @@ Besides `uncertain`, `monitored`, `correctives`, `contingencies` and `participat
   — the restriction-of-the-right-hand-side idea, used to obtain guaranteed-achievable values rather
   than the exact frontier. A negative `ε_R` tolerates an overload of `|ε_R|` and so relaxes the
   test, which is the direction that yields outer bounds. `0` gives the exact test.
+* `screen` — drop monitored branches whose flow bound proves they cannot fail, shrinking the
+  model (see [`screen_monitored`](@ref)). The security verdict is unchanged; a reported `φ` on a
+  comfortably secure grid may fall to the next-tightest branch, which is why it is opt-in.
 * `exchange` — `(; buses, lo, hi)` to use the **exchange parameterisation**: the uncertainty is
   restricted to realisations whose net injection deviation over `buses` (the zone's exchange) lies
   in `[lo, hi]`. `uncertain` then bounds how the exchange may be composed per bus, while `lo`/`hi`
@@ -1132,7 +1213,7 @@ function worst_case_oracle(network;
                            pst_model::AbstractDict = Dict{String,Any}(),
                            exchange = nothing, restriction = 0.0,
                            uncertain_generators = NamedTuple[], auto_bigM = true,
-                           emergency = String[], discrete = String[],
+                           emergency = String[], discrete = String[], screen = false,
                            slack::Union{Nothing,String} = nothing,
                            optimizer = HiGHS.Optimizer, tol = 1e-5, max_iter = 30,
                            bigM = 1e4, balance_bigM = 1e5, silent = true)
@@ -1142,6 +1223,12 @@ function worst_case_oracle(network;
     end
     _check_monitored(gm, monitored)
     conts = collect(String, contingencies)
+    if screen
+        monitored, _ = screen_monitored(gm, monitored, conts; restriction = restriction,
+                                        uncertain = uncertain, ugens = collect(uncertain_generators),
+                                        participation = participation, pst_limits = pst_limits,
+                                        pst_model = pst_model)
+    end
     correctives = collect(String, correctives)
     switch = Set(collect(String, switchable))
     states = _states(conts)

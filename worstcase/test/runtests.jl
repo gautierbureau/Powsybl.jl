@@ -425,6 +425,53 @@ end
     @test rev.binding.direction == :reverse       # the surplus reverses the corridor
 end
 
+@testset "Monitored-branch screening (drop what cannot fail)" begin
+    # The flow bounds over-estimate what a branch can carry, so a branch whose bound cannot reach
+    # its rating can never be the one that fails, in any state, and need not be in the model at all.
+    # Bounds on this fixture (L_B contingency, load uncertainty at B3, G1+G2 responding):
+    #   L12a 396   L1_2a 203   L2b_3 450   L_B 508   PST_T 203
+    gm = W.GridModel(build_ext())
+    box = Dict("VL3_0" => (-200.0, 0.0))
+    part = Dict("G1" => 1.0, "G2" => 1.0)
+    mon = Dict{String,Any}("L12a" => 110.0, "L1_2a" => 1e4, "L2b_3" => 600.0,
+                           "L_B" => 1e4, "PST_T" => 500.0)
+    kept, dropped = W.screen_monitored(gm, mon, ["L_B"]; uncertain = box, participation = part)
+    @test collect(keys(kept)) == ["L12a"]                      # only the 110 MW monitor can bind
+    @test dropped == ["L1_2a", "L2b_3", "L_B", "PST_T"]
+
+    # The verdict and the value are untouched: φ was attained on a branch the screen keeps.
+    full   = W.worst_case_oracle(build_ext(); uncertain = box, monitored = mon,
+                                 contingencies = ["L_B"], participation = part)
+    thin   = W.worst_case_oracle(build_ext(); uncertain = box, monitored = mon,
+                                 contingencies = ["L_B"], participation = part, screen = true)
+    @test W.is_secure(full) == W.is_secure(thin)
+    @test thin.phi ≈ full.phi atol = 1e-6
+    @test thin.binding.branch == full.binding.branch
+
+    # …and so is the frontier, which by construction cannot depend on branches that never fail.
+    fbox = Dict("VL3_0" => (-400.0, 0.0))          # wide enough for the frontier to sit inside
+    fe(sc) = W.min_violating_exchange(build_ext(); zone = ["VL3_0"], uncertain = fbox,
+                monitored = mon, e_cap = 400.0, screen = sc)[1]
+    @test fe(true) ≈ fe(false) atol = 1e-6
+    @test fe(true) ≈ 112.4 atol = 0.5              # the same frontier the unscreened test pins
+
+    # A demanded margin means failing takes less flow, so the screen has to keep more.
+    lax, _ = W.screen_monitored(gm, mon, ["L_B"]; uncertain = box, participation = part)
+    strict, _ = W.screen_monitored(gm, mon, ["L_B"]; uncertain = box, participation = part,
+                                   restriction = 0.9)
+    @test length(strict) > length(lax)
+    @test haskey(strict, "L2b_3")                              # 450/600 = 0.75 ≥ 1 − 0.9
+
+    # The kept set is never empty: with nothing able to bind, the least slack branch is retained so
+    # the reported φ still refers to something.
+    loose = Dict{String,Any}("L1_2a" => 1e4, "L_B" => 1e4)
+    k2, d2 = W.screen_monitored(gm, loose, ["L_B"]; uncertain = box, participation = part)
+    @test length(k2) == 1 && length(d2) == 1
+    @test collect(keys(k2)) == ["L_B"]                         # 508/1e4 beats 203/1e4
+    @test W.is_secure(W.worst_case_oracle(build_ext(); uncertain = box, monitored = loose,
+                contingencies = ["L_B"], participation = part, screen = true))
+end
+
 @testset "A misspelled monitored branch is rejected, not silently ignored" begin
     # A state drops branches that are out in it, so the overload builder has to skip ids it cannot
     # find — which used to swallow a typo as well, reporting a serene "secure" for a grid on which
