@@ -149,14 +149,33 @@ appears in the solver loop):
   forward one of `10`, a flow of 20 gives ratios of `−200` and `2`, and a big-M of 150 silently
   breaks the disjunction. They take `max(25, max_limit / min_limit)`.
 
-  `PowsyblWorstCase.screen_monitored` is our version, and it needs no solve at all: the per-branch
-  flow bounds (below) already over-estimate what a branch can carry, so comparing that bound with
-  the rating in each state settles it. Theirs is one MILP over the whole grid and so captures the
-  coupling between branches; ours lets each bus take its worst value independently and is looser
-  there, but enumerates contingency topologies explicitly rather than collapsing them into one
-  generic post-contingency case, and is tighter there. Both are sound — ours simply drops somewhat
-  fewer branches, for no cost — and ours decides per branch by construction, where the shipped
-  binary reports a single ratio for the whole set.
+  `PowsyblWorstCase.screen_monitored` implements **both** readings, so they can be compared on the
+  same case. `method = :bounds` needs no solve: the per-branch flow bounds (below) already
+  over-estimate what a branch can carry, so comparing that bound with the rating in each state
+  settles it, with every bus free to take its worst injection independently. `method = :lp` is
+  theirs — maximise the ratio over the model, with balance enforced and the corrective controls
+  free and maximised (which is what keeps it an over-estimate rather than an answer).
+
+  Measured on the `build_ext` fixture, the largest ratio each monitored branch can reach:
+
+  | branch | `:bounds` | `:lp` |
+  |---|---|---|
+  | `L12a`  | 3.6021 | 1.9481 |
+  | `L1_2a` | 0.0203 | 0.0086 |
+  | `L2b_3` | 0.7500 | 0.5000 |
+  | `L_B`   | 0.0508 | 0.0152 |
+  | `PST_T` | 0.4067 | 0.1714 |
+
+  Enforcing balance is worth roughly a factor of two, and it decides real cases: rate `L2b_3` at
+  350 MW and the arithmetic cannot rule it out (450/350) while the optimisation can (300/350). Both
+  screens are sound and both leave the verdict unchanged; they differ only in how much slack they
+  leave on the table.
+
+  Two departures from the reference, both deliberate. We solve over the *real* per-contingency
+  topologies rather than one generic post-contingency case, which is tighter. And we maximise each
+  ratio separately instead of packing the whole set into one solve with a one-hot selection: that
+  yields the same global number (`filter_ratio`, their binary's output) plus the per-branch detail
+  their formulation discards, and it removes the big-M their own file warns about.
 
 **The iteration itself** uses the two outer levels plus **three MLP-shaped programs**:
 

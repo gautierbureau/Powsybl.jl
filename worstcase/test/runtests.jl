@@ -472,6 +472,54 @@ end
                 contingencies = ["L_B"], participation = part, screen = true))
 end
 
+@testset "Screening by arithmetic and by optimisation (the reference's filter)" begin
+    # Two ways to over-estimate the worst ratio a branch can reach. `:bounds` is interval
+    # arithmetic on the flow bounds — every bus free to take its worst injection independently.
+    # `:lp` maximises the ratio over the model itself, so balance across buses is enforced and the
+    # corrective controls are free and maximised (which is what keeps it an over-estimate).
+    gm = W.GridModel(build_ext())
+    box = Dict("VL3_0" => (-200.0, 0.0))
+    part = Dict("G1" => 1.0, "G2" => 1.0)
+    mon = Dict{String,Any}("L12a" => 110.0, "L1_2a" => 1e4, "L2b_3" => 600.0,
+                           "L_B" => 1e4, "PST_T" => 500.0)
+    rb = W.max_overload_ratios(gm, mon, ["L_B"]; uncertain = box, participation = part)
+    rl = W.max_overload_ratios(gm, mon, ["L_B"]; method = :lp, uncertain = box, participation = part)
+
+    # Both are sound, and enforcing balance is worth roughly a factor of two here.
+    @test all(rl[k] <= rb[k] + 1e-9 for k in keys(mon))
+    @test rl["L12a"] ≈ 1.9481 atol = 1e-3      # bounds says 3.6021
+    @test rb["L12a"] ≈ 3.6021 atol = 1e-3
+    @test rl["L2b_3"] ≈ 0.5 atol = 1e-3        # 300 MW through a 600 MW rating
+    @test rb["L2b_3"] ≈ 0.75 atol = 1e-3
+
+    # Sound means: no smaller than what the model actually reaches. The oracle finds L12a at 1.5
+    # times its 110 MW rating post-contingency, and both estimates sit above that.
+    sol = W.worst_case_oracle(build_ext(); uncertain = box, monitored = mon,
+                              contingencies = ["L_B"], participation = part)
+    @test rl["L12a"] >= sol.phi + 1 - 1e-6
+    @test rb["L12a"] >= sol.phi + 1 - 1e-6
+
+    # The reference's `filter` reports one number for the whole set — the largest of these — and we
+    # get the element attaining it for free, since the per-branch values are computed anyway.
+    f, at = W.filter_ratio(gm, mon, ["L_B"]; uncertain = box, participation = part)
+    @test f ≈ maximum(values(rl)) atol = 1e-9
+    @test at.branch == "L12a" && at.state == :contingency && at.outage == "L_B"
+
+    # Where the tightness shows: a rating between the two estimates is kept by one and dropped by
+    # the other. L2b_3 carries at most 300 MW, but the arithmetic bound says 450.
+    mon2 = merge(mon, Dict{String,Any}("L2b_3" => 350.0))
+    kb, _ = W.screen_monitored(gm, mon2, ["L_B"]; uncertain = box, participation = part)
+    kl, _ = W.screen_monitored(gm, mon2, ["L_B"]; method = :lp, uncertain = box, participation = part)
+    @test haskey(kb, "L2b_3")                  # 450/350 = 1.29 ⇒ arithmetic cannot rule it out
+    @test !haskey(kl, "L2b_3")                 # 300/350 = 0.86 ⇒ optimisation can
+    @test issubset(keys(kl), keys(kb))
+
+    # …and the extra drop is safe: the verdict is the same however the set was screened.
+    verdict(m) = W.is_secure(W.worst_case_oracle(build_ext(); uncertain = box, monitored = mon2,
+                    contingencies = ["L_B"], participation = part, screen = m))
+    @test verdict(false) == verdict(:bounds) == verdict(:lp)
+end
+
 @testset "A misspelled monitored branch is rejected, not silently ignored" begin
     # A state drops branches that are out in it, so the overload builder has to skip ids it cannot
     # find — which used to swallow a typo as well, reporting a serene "secure" for a grid on which

@@ -152,6 +152,18 @@ kept, dropped = screen_monitored(GridModel(network), monitored, contingencies;
 sol = worst_case_oracle(network; ..., screen = true)   # or let the oracle do it
 ```
 
+There are two ways to over-estimate that ratio, and `method` picks between them:
+
+| | how | on the test fixture |
+|---|---|---|
+| `:bounds` (default) | interval arithmetic on `flow_bounds`; every bus free to take its worst injection independently | `L12a` 3.60, `L2b_3` 0.75 |
+| `:lp` | maximise the ratio over the model, one solve per branch/state/direction; balance enforced, correctives free and maximised | `L12a` 1.95, `L2b_3` 0.50 |
+
+Both are sound; enforcing balance is worth roughly a factor of two, so `:lp` drops more. It costs
+solves, which is worth it once the monitored set is large enough that carrying a slack branch costs
+more than proving it slack. `max_overload_ratios` returns the per-branch values directly, and
+`filter_ratio` the single largest with the element attaining it.
+
 This preserves the security verdict exactly, and the frontier `min_violating_exchange` reports,
 since neither can depend on a branch that never fails. It does **not** preserve the value of `φ` on
 a comfortably secure grid: drop the least-slack branch and the reported `φ` falls to the next one.

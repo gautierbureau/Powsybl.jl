@@ -42,7 +42,7 @@ using LinearAlgebra: inv
 const NET = Powsybl.Network
 
 export GridModel, WorstCaseSolution, Binding, worst_case_oracle, is_secure, zone_exchange,
-       min_violating_exchange, screen_monitored, flow_bounds
+       min_violating_exchange, screen_monitored, max_overload_ratios, filter_ratio, flow_bounds
 
 # ---------------------------------------------------------------------------
 # Branches (lines, PSTs, HVDC) and generators
@@ -870,39 +870,172 @@ branch_bigM(gm, conts; cap = Inf, kwargs...) =
 # one, the reported `φ` falls to the next. That is why it is opt-in rather than automatic.
 # ---------------------------------------------------------------------------
 """
-    screen_monitored(gm, monitored, contingencies; restriction = 0.0, kwargs...) -> (kept, dropped)
+    max_overload_ratios(gm, monitored, contingencies; method = :bounds, ...) -> Dict(branch => ratio)
+
+The largest `|P| / rating` each monitored branch could reach, in any state, under any uncertainty —
+an over-estimate, so a branch whose value is below 1 can never be the one that fails.
+
+Two ways to compute it, and they differ only in how much they over-estimate:
+
+* `:bounds` (default) — read off [`flow_bounds`](@ref), pure arithmetic and no solve. Each bus is
+  free to take its worst injection independently of the others, which is looser than the physics
+  allows.
+* `:lp` — maximise the ratio itself over the model, one solve per branch, state and direction.
+  Balance across buses is enforced, so it is **tighter**; corrective controls are left free and
+  maximised, which is what keeps it an over-estimate rather than an answer.
+
+`:lp` accepts the modelling keywords of [`worst_case_oracle`](@ref) (`correctives`, `switchable`,
+`pst_limits`, `pst_model`, `participation`, `uncertain_generators`, `emergency`, `exchange`,
+`optimizer`); `:bounds` accepts those of [`flow_bounds`](@ref).
+"""
+function max_overload_ratios(gm::GridModel, monitored::AbstractDict, contingencies;
+                             method::Symbol = :bounds, uncertain = Dict{String,Tuple{Float64,Float64}}(),
+                             ugens = NamedTuple[], participation = nothing,
+                             pst_limits = Dict{String,Float64}(), pst_model = Dict{String,Any}(),
+                             correctives = String[], switchable = String[], emergency = String[],
+                             exchange = nothing, optimizer = HiGHS.Optimizer, silent = true,
+                             bigM = 1e4, balance_bigM = 1e5)
+    conts = collect(String, contingencies)
+    states = _states(conts)
+    if method === :bounds
+        bounds = flow_bounds(gm, conts; uncertain = uncertain, ugens = ugens,
+                             participation = participation, pst_limits = pst_limits,
+                             pst_model = pst_model)
+        out = Dict{String,Float64}()
+        for (id, limspec) in monitored
+            b = get(bounds, id, Inf)
+            worst = 0.0
+            for st in states
+                lo, hi = _limit_pair(_limit(limspec, st))
+                lim = min(hi, abs(lo))
+                lim > 0 && (worst = max(worst, b / lim))
+            end
+            out[id] = worst
+        end
+        return out
+    end
+    method === :lp || throw(ArgumentError("unknown method $(method); use :bounds or :lp"))
+    ratios, _ = _relaxed_ratios(gm, monitored, conts, states; uncertain = uncertain, ugens = ugens,
+        participation = participation, pst_limits = pst_limits, pst_model = pst_model,
+        correctives = correctives, switchable = switchable, emergency = emergency,
+        exchange = exchange, optimizer = optimizer, silent = silent, bigM = bigM,
+        balance_bigM = balance_bigM)
+    return ratios
+end
+
+# The relaxation the `:lp` screen maximises over: the full multi-state system with **no limit
+# enforced** and the corrective controls free. Leaving them free and maximising is what makes the
+# result an over-estimate — we do not know which response the lower level would pick, so we grant
+# the worst one. Every overload expression is `P/limit − 1`, so maximising it maximises the flow
+# against that rating; the two directions of a branch are its maximum and its minimum flow, which
+# is why no further solves are needed per branch.
+function _relaxed_ratios(gm, monitored, conts, states; uncertain, ugens, participation, pst_limits,
+                         pst_model, correctives, switchable, emergency, exchange, optimizer,
+                         silent, bigM, balance_bigM)
+    correctives = collect(String, correctives)
+    switch = Set(collect(String, switchable))
+    bigMs = flow_bounds(gm, conts; uncertain = uncertain, ugens = ugens,
+                        participation = participation, pst_limits = pst_limits,
+                        pst_model = pst_model)
+    bigMs = Dict(id => 2 * b + 1.0 for (id, b) in bigMs)
+
+    model = Model(optimizer); silent && set_silent(model)
+    v = _uncertainty_model!(model, uncertain, ugens)
+    _exchange_constraint!(model, v, exchange)
+    inj_unc, inj_nom, drop_slack = _injection_model!(model, gm, participation, v, balance_bigM;
+                                                     emergency = emergency)
+    psts = Dict(b.id => b for b in gm.branches if b isa Pst)
+    α = Dict{Tuple{String,String},Any}()
+    op = Dict{Tuple{String,String},VariableRef}()
+    for c in conts, pid in correctives
+        br = psts[pid]
+        a = @variable(model, base_name = "α_$(pid)_$(c)")
+        set_lower_bound(a, br.alpha_min); set_upper_bound(a, br.alpha_max)
+        α[(pid, c)] = a
+        pid in switch && (op[(pid, c)] = @variable(model, binary = true, base_name = "open_$(pid)_$(c)"))
+    end
+    terms = Tuple{Any,Binding}[]
+    _build_program!(model, gm, states, monitored, correctives, switch, pst_limits, pst_model,
+                    inj_unc, inj_nom, drop_slack, bigM, "",
+                    (pid, c) -> get(α, (pid, c), nothing),
+                    (pid, c) -> get(op, (pid, c), nothing),
+                    (o, lbl) -> push!(terms, (o, lbl)); bigMs = bigMs)
+
+    ratios = Dict{String,Float64}(id => 0.0 for id in keys(monitored))
+    best = nothing; bestval = -Inf
+    for (o, lbl) in terms
+        @objective(model, Max, o)
+        optimize!(model)
+        termination_status(model) == MOI.OPTIMAL || continue
+        r = objective_value(model) + 1          # the overload expression is P/limit − 1
+        r > ratios[lbl.branch] && (ratios[lbl.branch] = r)
+        r > bestval && (bestval = r; best = lbl)
+    end
+    return ratios, best
+end
+
+"""
+    filter_ratio(gm, monitored, contingencies; kwargs...) -> (ratio, binding)
+
+The single largest `|P| / rating` any monitored branch can reach, anywhere — the reference
+`filter` binary's output ("Maximal ratio of flow compared to limits is …"), plus which element
+attains it. Below 1 and no monitored branch can ever be violated.
+
+The reference packs this into one solve with a one-hot selection over every ratio, which needs a
+big-M its own source warns about: against a reverse rating of `−0.1` and a forward one of `10`, a
+flow of 20 gives ratios of `−200` and `2`, and a big-M chosen for the forward side breaks the
+disjunction. Maximising each ratio separately gives the same number with no big-M at all, and
+yields the per-branch detail as a by-product — so that is what this does.
+"""
+function filter_ratio(gm::GridModel, monitored::AbstractDict, contingencies; kwargs...)
+    conts = collect(String, contingencies)
+    ratios, best = _relaxed_ratios(gm, monitored, conts, _states(conts); _ratio_defaults(kwargs)...)
+    return (isempty(ratios) ? 0.0 : maximum(values(ratios))), best
+end
+
+function _ratio_defaults(kwargs)
+    d = Dict{Symbol,Any}(:uncertain => Dict{String,Tuple{Float64,Float64}}(), :ugens => NamedTuple[],
+        :participation => nothing, :pst_limits => Dict{String,Float64}(),
+        :pst_model => Dict{String,Any}(), :correctives => String[], :switchable => String[],
+        :emergency => String[], :exchange => nothing, :optimizer => HiGHS.Optimizer,
+        :silent => true, :bigM => 1e4, :balance_bigM => 1e5)
+    for (k, val) in kwargs
+        haskey(d, k) || throw(ArgumentError("unknown keyword $(k)"))
+        d[k] = val
+    end
+    return d
+end
+
+"""
+    screen_monitored(gm, monitored, contingencies; restriction = 0.0, method = :bounds, ...)
+        -> (kept, dropped)
 
 Split `monitored` into the branches that could bind and those that provably cannot, by comparing
-each branch's [`flow_bounds`](@ref) bound against its rating in every state.
+each branch's [`max_overload_ratios`](@ref) value against the threshold at which it would count as
+failing.
 
 A branch counts as failing once its flow reaches `(1 − restriction)` times its rating, so a
 positive `restriction` (a demanded margin) makes failure easier and drops fewer branches — the
 screen follows the same convention as the rest of the package.
 
+`method` picks how the ratio is obtained: `:bounds` (arithmetic, no solve) or `:lp` (one solve per
+branch, state and direction). Both are sound over-estimates and differ only in how much slack they
+leave: `:lp` enforces balance across buses where `:bounds` does not, so it is the tighter of the
+two on every case measured here and drops at least as much — pay for it when the monitored set is
+large enough that carrying a slack branch costs more than proving it slack.
+
 The kept set is never empty: if every branch clears its rating the one with the least slack is
-retained, so the reported `φ` still refers to something. Keywords beyond `restriction` are those of
-[`flow_bounds`](@ref).
+retained, so the reported `φ` still refers to something.
 """
 function screen_monitored(gm::GridModel, monitored::AbstractDict, contingencies;
-                          restriction = 0.0, kwargs...)
-    conts = collect(String, contingencies)
-    bounds = flow_bounds(gm, conts; kwargs...)
-    states = _states(conts)
+                          restriction = 0.0, method::Symbol = :bounds, kwargs...)
+    slack = max_overload_ratios(gm, monitored, contingencies; method = method, kwargs...)
     thr = 1 - restriction
     kept = empty(monitored)
     dropped = String[]
-    slack = Dict{String,Float64}()          # bound / rating: the closest any state gets to failing
     for (id, limspec) in monitored
-        b = get(bounds, id, Inf)
-        worst = 0.0
-        for st in states
-            lo, hi = _limit_pair(_limit(limspec, st))
-            lim = min(hi, abs(lo))
-            lim > 0 && (worst = max(worst, b / lim))
-        end
-        slack[id] = worst
         # strict, with a relative guard: never drop on a knife edge
-        if worst <= thr * (1 - 1e-9)
+        if slack[id] <= thr * (1 - 1e-9)
             push!(dropped, id)
         else
             kept[id] = limspec
@@ -1100,11 +1233,14 @@ function min_violating_exchange(network;
     end
     _check_monitored(gm, monitored)
     conts = collect(String, contingencies)
-    if screen
+    if screen !== false
         monitored, _ = screen_monitored(gm, monitored, conts; restriction = restriction,
+                                        method = (screen === true ? :bounds : screen),
                                         uncertain = uncertain, ugens = collect(uncertain_generators),
                                         participation = participation, pst_limits = pst_limits,
-                                        pst_model = pst_model)
+                                        pst_model = pst_model, correctives = correctives,
+                                        switchable = switchable, emergency = emergency,
+                                        optimizer = optimizer, silent = silent)
     end
     correctives = collect(String, correctives)
     switch = Set(collect(String, switchable))
@@ -1197,9 +1333,11 @@ Besides `uncertain`, `monitored`, `correctives`, `contingencies` and `participat
   — the restriction-of-the-right-hand-side idea, used to obtain guaranteed-achievable values rather
   than the exact frontier. A negative `ε_R` tolerates an overload of `|ε_R|` and so relaxes the
   test, which is the direction that yields outer bounds. `0` gives the exact test.
-* `screen` — drop monitored branches whose flow bound proves they cannot fail, shrinking the
-  model (see [`screen_monitored`](@ref)). The security verdict is unchanged; a reported `φ` on a
-  comfortably secure grid may fall to the next-tightest branch, which is why it is opt-in.
+* `screen` — drop monitored branches that provably cannot fail, shrinking the model
+  (see [`screen_monitored`](@ref)). `true` (or `:bounds`) screens by arithmetic on the flow bounds;
+  `:lp` proves it by optimisation, which is tighter but costs solves. The security verdict is
+  unchanged either way; a reported `φ` on a comfortably secure grid may fall to the next-tightest
+  branch, which is why it is opt-in.
 * `exchange` — `(; buses, lo, hi)` to use the **exchange parameterisation**: the uncertainty is
   restricted to realisations whose net injection deviation over `buses` (the zone's exchange) lies
   in `[lo, hi]`. `uncertain` then bounds how the exchange may be composed per bus, while `lo`/`hi`
@@ -1223,11 +1361,14 @@ function worst_case_oracle(network;
     end
     _check_monitored(gm, monitored)
     conts = collect(String, contingencies)
-    if screen
+    if screen !== false
         monitored, _ = screen_monitored(gm, monitored, conts; restriction = restriction,
+                                        method = (screen === true ? :bounds : screen),
                                         uncertain = uncertain, ugens = collect(uncertain_generators),
                                         participation = participation, pst_limits = pst_limits,
-                                        pst_model = pst_model)
+                                        pst_model = pst_model, correctives = correctives,
+                                        switchable = switchable, emergency = emergency,
+                                        optimizer = optimizer, silent = silent)
     end
     correctives = collect(String, correctives)
     switch = Set(collect(String, switchable))
