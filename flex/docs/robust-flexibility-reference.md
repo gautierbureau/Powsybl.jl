@@ -56,6 +56,8 @@ with `x` the preventive actions (generator set-points). This is a three-level pr
 | Exchange parameterisation | `PowsyblWorstCase` `exchange=`, `PowsyblFlexibility.max_exchange` | the exchange variable the objectives are written in |
 | Two-sided bounding | `PowsyblFlexibility.exchange_bracket` | the `aux` restriction schedule |
 | Certifying scenario | `PowsyblFlexibility.certifying_scenario` | `wcgen` post-processing |
+| Monitored screening | `PowsyblWorstCase.screen_monitored` | the `filter` binary |
+| End-to-end driver | `PowsyblFlexibility.analyse_exchange` | `grid_solver::solve` (all `main.cpp` does is parse options and call it) |
 
 The factoring lines up almost one-to-one, which is good evidence the split is the right one.
 
@@ -191,6 +193,35 @@ appears in the solver loop):
 
 `cpf` and `wcgen` (and `aux`) are all *derived from* the medial formulation — each is the medial
 with a modified objective and an extra constraint — which is why they share its variables.
+
+### What the driver actually sequences
+
+`main.cpp` is only option parsing: it builds a `grid_solver`, forwards ~18 options, and calls
+`solve()`. That function is the pipeline:
+
+1. `generate_problem_description` reads the formulation files into the eight programs.
+2. **`solve_init`** — one initial iteration. Solve the `ulp` once (`solve_ulp_grid`); launch `aux`
+   asynchronously; launch the `mlp` feasibility check on the `ulp` candidate unless the record is
+   already global; then **race** them (poll at 50 ms, abort the loser once both bounds are done).
+   Discretize whatever came back, and finally run `wcgen` if the force level calls for it.
+3. **Early exit** if that iteration already settled it — infeasible, global, or feasible with
+   `lbd > 0` (an established violation).
+4. Otherwise spawn `solve_lbd` and `solve_ubd` as two threads and join them. `lbd` runs the exact
+   side; `ubd` carries a right-hand-side restriction `ub_restrict`, starting at `eps_g = 0.05` and
+   halved (`red_g = 2`) as the iteration makes progress.
+
+`analyse_exchange` mirrors that shape: copper plate, bound tightening, screen, the security
+question at zero exchange (with the same early exit), the frontier — either the single exact solve
+or the two-sided bracket — and the certificate under a gate matching `--force-worst-case-gen`.
+
+Two places where ours is deliberately shorter. The reference solves its preventive level first and
+tests *that* candidate; under a fixed dispatch — its own `assume_fixed_upper` — that degenerates
+into the security question at zero exchange, which is what our init stage asks. And its certificate
+gate has three levels whose first two differ only in whether the balanced medial finished; ours is
+exact by construction, so they collapse and the option is a plain `:auto` / `:always` / `:never`.
+
+The restriction schedule is theirs: `exchange_bracket` now defaults to `init_res = 0.05` and a
+reduction of `1/4`, matching what `solve_aux` sets (`init_res` 0.05, `red_res` 4.0).
 
 ### The AUX ∥ MLP race
 
@@ -355,10 +386,10 @@ covered, and the six-bus benchmark reproduces exactly. What is left is performan
 1. **Jointly optimising the preventive actions `x`** (`solve_esip_bnf` as the outer driver) — the
    only level still missing entirely. It is disabled in the reference too, so treat it as
    exploratory rather than parity work.
-2. **Racing the two bounding legs** — `exchange_bracket` runs them in sequence; the reference runs
-   `aux` and `mlp` concurrently and lets the first to settle the step abort the other. Pure
-   wall-clock, and it cannot change the answer, so it is worth doing only once the model size is
-   settled.
+2. **Racing the two bounding legs** — `analyse_exchange` runs them in sequence; the reference runs
+   `aux` and `mlp` concurrently, polling at 50 ms and aborting the loser once both bounds are done.
+   Pure wall-clock, and it cannot change the answer. The design question is not the race but
+   Julia threads around HiGHS and the Powsybl JNI layer, which is why it is still open.
 3. A **corrective line automaton** as a device type, **per-tap admittance** (we keep the susceptance
    tap-independent), and **several cascading full shifters within one state** — scope extensions
    rather than fidelity gaps on the cases we model today.

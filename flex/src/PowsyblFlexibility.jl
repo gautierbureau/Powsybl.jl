@@ -33,6 +33,7 @@ export flexibility_max, copperplate_bound, FlexibilityResult
 export max_exchange, copperplate_exchange_interval, ExchangeResult
 export exchange_bracket, BracketResult
 export certifying_scenario, CertificateResult
+export analyse_exchange, AnalysisResult
 
 # ---------------------------------------------------------------------------
 # δ-parameterised uncertainty region
@@ -333,7 +334,8 @@ upper bound, by running [`PowsyblWorstCase.min_violating_exchange`](@ref) at `+�
 geometrically shrinking `ε`.
 
 The restriction starts at `init_restriction` and is multiplied by `reduction` each round; the loop
-stops once `upper − lower ≤ tol` or after `max_rounds`. Bounds accumulate monotonically, so the
+stops once `upper − lower ≤ tol` or after `max_rounds`. The defaults are the reference's own
+schedule for its auxiliary programme (`init_res = 0.05`, `red_res = 4`). Bounds accumulate monotonically, so the
 result is the tightest pair seen and remains valid however early the loop is cut short.
 
 Both bounds carry a guarantee at every round, not only on convergence, so a bracket that has not
@@ -342,7 +344,7 @@ Arguments are those of [`max_exchange`](@ref); everything beyond them is forward
 """
 function exchange_bracket(network; zone, box::AbstractDict, monitored::AbstractDict,
                           participation = nothing, slack = nothing, emax_cap = nothing,
-                          init_restriction = 0.1, reduction = 0.25, tol = 1e-2, max_rounds = 8,
+                          init_restriction = 0.05, reduction = 0.25, tol = 1e-2, max_rounds = 8,
                           oracle_kwargs...)
     init_restriction > 0 || throw(ArgumentError("init_restriction must be positive"))
     0 < reduction < 1 || throw(ArgumentError("reduction must lie strictly between 0 and 1"))
@@ -446,6 +448,135 @@ function certifying_scenario(network; zone, box::AbstractDict, monitored::Abstra
     e = -sum(get(sol.worst_injection, n, 0.0) for n in zone; init = 0.0)
     return CertificateResult(W.is_secure(sol), sol.phi, e, sol.worst_injection, sol.binding,
                              sol.corrective, (0.0, hi))
+end
+
+# ---------------------------------------------------------------------------
+# The whole pipeline, in the reference's order
+# ---------------------------------------------------------------------------
+# Every stage below already existed as its own call; what was missing was the sequence, and a
+# single record to read the outcome off. The reference's `main` does nothing but parse options and
+# hand them to one `solve()`, so this mirrors that shape: the stages it runs before the loop, the
+# early exit its initial iteration takes, the bounding pair, and the certificate its
+# post-processing produces.
+#
+# The order matters and is theirs:
+#
+#   copper plate  →  bound tightening  →  screen  →  is it secure at all  →  bound  →  certify
+#
+# Two departures, both because the level above is not in play here. The reference solves its
+# preventive level first and tests *that* candidate; with a fixed dispatch — its own
+# `assume_fixed_upper` — that step degenerates into the security question at zero exchange, which
+# is what the init stage below asks. And its certificate gate has three levels, of which the first
+# two differ only in whether the balanced medial finished; ours is exact, so those collapse into
+# one and the option is a plain three-way choice instead.
+# ---------------------------------------------------------------------------
+
+"""
+Result of [`analyse_exchange`](@ref) — the whole pipeline in one record.
+
+* `emax` — the reported maximum exchange, and `bracket` the two-sided bounds when asked for.
+* `interval` — the copper-plate exchange interval that bracketed the search.
+* `kept` / `dropped` — the monitored set after screening, and what it removed.
+* `secure_at_zero` — whether the grid holds at the forecast exchange at all.
+* `certificate` — the verdict on the reported range, when one was produced.
+* `status` — `:insecure_at_zero`, `:exact` (a single frontier solve), or `:bracketed`.
+"""
+struct AnalysisResult
+    emax::Float64
+    bracket::Union{Nothing,BracketResult}
+    interval::Tuple{Float64,Float64}
+    kept::Vector{String}
+    dropped::Vector{String}
+    secure_at_zero::Bool
+    certificate::Union{Nothing,CertificateResult}
+    status::Symbol
+end
+
+"""
+    analyse_exchange(network; zone, box, monitored, screen = false, bound = :exact,
+                     certify = :auto, ...) -> AnalysisResult
+
+Run the maximum-exchange analysis end to end, in the order the reference's solver runs it:
+copper-plate interval, bound tightening, monitored screening, the security check at zero exchange,
+the frontier, and the certificate.
+
+* `screen` — `false`, `:bounds` or `:lp`, passed to
+  [`PowsyblWorstCase.screen_monitored`](@ref). Screening happens **once**, here, and the reduced
+  set is what every later stage sees.
+* `bound` — `:exact` for the single frontier solve, or `:bracket` to enclose it between an
+  achievable and a certified value ([`exchange_bracket`](@ref)). `emax` is the frontier in the
+  first case and the *achievable* bound in the second, so it is a transfer that holds either way.
+* `certify` — `:auto` (certify only when the bounding did not settle the answer exactly),
+  `:always`, or `:never`. This is the reference's `--force-worst-case-gen`; its levels 0 and 1
+  differ only in whether the balanced medial finished, which ours does by construction, so they
+  collapse into `:auto`.
+
+The pipeline stops early where the reference does: if the grid is already insecure at zero
+exchange there is no frontier to look for, and `emax` is 0.
+
+Remaining keywords are those of [`max_exchange`](@ref) and are forwarded to the oracle.
+"""
+function analyse_exchange(network; zone, box::AbstractDict, monitored::AbstractDict,
+                          screen = false, bound::Symbol = :exact, certify::Symbol = :auto,
+                          participation = nothing, slack = nothing, emax_cap = nothing,
+                          init_restriction = 0.05, reduction = 0.25, tol = 1e-2, max_rounds = 8,
+                          extension = 0.0, oracle_kwargs...)
+    bound in (:exact, :bracket) || throw(ArgumentError("bound must be :exact or :bracket"))
+    certify in (:auto, :always, :never) ||
+        throw(ArgumentError("certify must be :auto, :always or :never"))
+    zone = collect(String, zone)
+
+    # 1. copper plate — the interval any answer must lie in, and the cap on the search
+    interval = copperplate_exchange_interval(network, zone; participation = participation,
+                                             slack = slack)
+    # 2 & 3. bound tightening feeds the screen; the oracle derives its own big-Ms from the same
+    # quantity, so nothing needs passing between them.
+    kept, dropped = monitored, String[]
+    if screen !== false
+        gm = W.GridModel(network; slack = slack)
+        kept, dropped = W.screen_monitored(gm, monitored, get(oracle_kwargs, :contingencies, String[]);
+                                           method = (screen === true ? :bounds : screen),
+                                           uncertain = box, participation = participation)
+    end
+
+    # 4. the initial question: does the grid hold at the forecast exchange at all?
+    init = W.worst_case_oracle(network; uncertain = box, monitored = kept,
+                               participation = participation, slack = slack,
+                               exchange = (buses = zone, lo = 0.0, hi = 0.0), oracle_kwargs...)
+    if !W.is_secure(init)
+        cert = certify === :never ? nothing :
+               certifying_scenario(network; zone = zone, box = box, monitored = kept, emax = 0.0,
+                                   participation = participation, slack = slack,
+                                   oracle_kwargs...)
+        return AnalysisResult(0.0, nothing, interval, sort!(collect(keys(kept))), dropped,
+                              false, cert, :insecure_at_zero)
+    end
+
+    # 5. the frontier, exactly or from both sides
+    br = nothing
+    if bound === :bracket
+        br = exchange_bracket(network; zone = zone, box = box, monitored = kept,
+                              participation = participation, slack = slack, emax_cap = emax_cap,
+                              init_restriction = init_restriction, reduction = reduction,
+                              tol = tol, max_rounds = max_rounds, oracle_kwargs...)
+        emax = br.lower                      # the side that is guaranteed achievable
+        settled = br.upper - br.lower <= tol
+    else
+        emax = max_exchange(network; zone = zone, box = box, monitored = kept,
+                            participation = participation, slack = slack, emax_cap = emax_cap,
+                            oracle_kwargs...).emax
+        settled = true                       # the cut formulation lands on the frontier
+    end
+
+    # 6. certify the reported range
+    cert = nothing
+    if certify === :always || (certify === :auto && !settled)
+        cert = certifying_scenario(network; zone = zone, box = box, monitored = kept, emax = emax,
+                                   extension = extension, participation = participation,
+                                   slack = slack, oracle_kwargs...)
+    end
+    return AnalysisResult(emax, br, interval, sort!(collect(keys(kept))), dropped, true, cert,
+                          bound === :bracket ? :bracketed : :exact)
 end
 
 end # module

@@ -99,7 +99,7 @@ reported transfer can be held. `exchange_bracket` runs both under a shrinking re
 ```julia
 b = exchange_bracket(network;
     zone = ["VL2_0"], box = box, monitored = Dict("L12" => 150.0),
-    init_restriction = 0.1, reduction = 0.25, tol = 0.5)
+    init_restriction = 0.05, reduction = 0.25, tol = 0.5)   # the reference's own schedule
 
 b.lower   # guaranteed achievable — the grid is securable across [0, lower]
 b.upper   # certified outer bound — no transfer above it can be held
@@ -143,6 +143,33 @@ the reported range instead of fixed, so it costs one oracle call and no new mode
 failure it finds says nothing about the interval, since it was told to look outside it. Only
 `extension = 0` tests the reported answer.
 
+## The whole pipeline in one call
+
+`analyse_exchange` runs the stages in the order the reference's solver runs them, and returns one
+record:
+
+```julia
+r = analyse_exchange(network; zone = ["VL2_0"], box = box, monitored = mon,
+                     screen = :lp, bound = :bracket, certify = :auto)
+
+r.interval     # copper-plate interval that bracketed the search
+r.kept         # monitored set after screening…
+r.dropped      # …and what it removed
+r.secure_at_zero
+r.emax         # the reported maximum exchange
+r.bracket      # the two-sided bounds, when asked for
+r.certificate  # the verdict on that range, or the counter-example
+r.status       # :insecure_at_zero | :exact | :bracketed
+```
+
+Copper plate → bound tightening → screen → *is it secure at all* → frontier → certificate. It stops
+early where the reference stops: if the grid is already insecure at the forecast exchange there is
+no frontier to look for, and what comes back is the failing scenario.
+
+`bound = :exact` takes the single frontier solve, `:bracket` encloses it and reports the achievable
+side. `certify` mirrors `--force-worst-case-gen`: `:auto` certifies only when the bounding did not
+settle the answer exactly, `:always` and `:never` force it either way.
+
 ## The δ-parameterised region
 
 `T(δ)` grows each forecast box `(lo, hi)` outward by `δ · weight` per side. A weight may be a
@@ -179,7 +206,8 @@ four-state model with correctives, integer-mode devices, and the full PST automa
 
 ## Scope (first slice)
 
-Fixed preventive dispatch; both region parameterisations — the **scaled hyperbox** (`δ`) and the
+One driver (`analyse_exchange`) sequencing the stages below; fixed preventive dispatch;
+both region parameterisations — the **scaled hyperbox** (`δ`) and the
 **power transfer** (`max_exchange`); the **copper-plate** bound and pre-filter for each; and
 **cutting** — the exchange as the objective, landing on the frontier in one solve — with
 bisection retained as a cross-check, a **restriction** for conservative answers, and

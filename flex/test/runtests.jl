@@ -236,6 +236,60 @@ end
                                                    monitored = mon, emax = 50.0, extension = -1.0)
 end
 
+@testset "analyse_exchange: the whole pipeline in the reference's order" begin
+    # copper plate → bound tightening → screen → secure at zero? → frontier → certificate,
+    # returned as one record. The corridor holds 50 MW against its 150 MW rating.
+    box = Dict("VL2_0" => (-1000.0, 0.0))
+    mon = Dict{String,Any}("L12" => 150.0)
+    net() = build_corridor(; g1max = 300.0)
+
+    r = analyse_exchange(net(); zone = ["VL2_0"], box = box, monitored = mon)
+    @test r.status == :exact
+    @test r.secure_at_zero
+    @test r.emax ≈ 50.0 atol = 1e-3
+    @test r.interval == (-100.0, 200.0)
+    @test r.kept == ["L12"] && isempty(r.dropped)
+    @test r.certificate === nothing            # :auto — the exact solve settled it, so no need
+
+    # Asking for it anyway confirms the range rather than breaking it.
+    a = analyse_exchange(net(); zone = ["VL2_0"], box = box, monitored = mon, certify = :always)
+    @test a.certificate !== nothing && a.certificate.clear
+
+    # The bracketing route reports the achievable side and encloses the same answer. Left open
+    # (a tolerance the schedule cannot reach in one round), `:auto` certifies of its own accord.
+    b = analyse_exchange(net(); zone = ["VL2_0"], box = box, monitored = mon,
+                         bound = :bracket, tol = 0.5)
+    @test b.status == :bracketed
+    @test b.bracket !== nothing
+    @test b.bracket.lower <= 50.0 <= b.bracket.upper
+    @test b.emax == b.bracket.lower            # the guaranteed side is what gets reported
+    open_b = analyse_exchange(net(); zone = ["VL2_0"], box = box, monitored = mon,
+                              bound = :bracket, tol = 0.5, max_rounds = 1)
+    @test open_b.bracket.upper - open_b.bracket.lower > 0.5
+    @test open_b.certificate !== nothing && open_b.certificate.clear
+
+    # Insecure at the forecast exchange ⇒ the pipeline stops where the reference stops, and the
+    # certificate it still produces is the failing scenario.
+    tight = analyse_exchange(net(); zone = ["VL2_0"], box = box,
+                             monitored = Dict{String,Any}("L12" => 90.0))
+    @test tight.status == :insecure_at_zero
+    @test !tight.secure_at_zero
+    @test tight.emax == 0.0
+    @test tight.certificate !== nothing && !tight.certificate.clear
+    @test tight.certificate.binding.branch == "L12"
+
+    # Screening runs once, up front, and the later stages see the reduced set. The corridor has a
+    # single branch and it can bind, so the screen keeps it — and must not move the answer.
+    sc = analyse_exchange(net(); zone = ["VL2_0"], box = box, monitored = mon, screen = :lp)
+    @test sc.kept == ["L12"] && isempty(sc.dropped)
+    @test sc.emax ≈ r.emax atol = 1e-6
+
+    @test_throws ArgumentError analyse_exchange(net(); zone = ["VL2_0"], box = box,
+                                                monitored = mon, bound = :nope)
+    @test_throws ArgumentError analyse_exchange(net(); zone = ["VL2_0"], box = box,
+                                                monitored = mon, certify = :nope)
+end
+
 @testset "Monitored screening reaches the search unchanged" begin
     # `screen = true` is forwarded to the oracle like any other keyword, so every entry point here
     # inherits it. Dropping branches that cannot fail must not move any reported answer.
