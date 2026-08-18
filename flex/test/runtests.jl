@@ -284,10 +284,44 @@ end
     @test sc.kept == ["L12"] && isempty(sc.dropped)
     @test sc.emax ≈ r.emax atol = 1e-6
 
+    # The discretization route — the reference's own — reaches the same answer from *above*, and
+    # because its medial is balanced the default force level certifies it without being asked.
+    # That gate earns its keep here: the master stops a hair above the frontier (50.0057 against
+    # 50.0) and the certificate is what notices, which is exactly why the reference has a level
+    # meaning "the balanced search finished, check it anyway".
+    d = analyse_exchange(net(); zone = ["VL2_0"], box = box, monitored = mon,
+                         bound = :discretization)
+    @test d.status == :discretized
+    @test d.emax ≈ 50.0 atol = 0.05
+    @test d.emax >= r.emax - 1e-6              # an outer approximation of the same frontier
+    @test d.certificate !== nothing            # level 1: a balanced search leaves the ends blind
+    @test !d.certificate.clear                 # …and it catches the overshoot
+    @test d.certificate.exchange ≈ d.emax atol = 1e-3
+    @test 0 < d.certificate.phi < 1e-3         # a hair over, not a real violation
+    # level 0 does not ask for it, since the loop did settle
+    @test analyse_exchange(net(); zone = ["VL2_0"], box = box, monitored = mon,
+                           bound = :discretization, certify = 0).certificate === nothing
+    @test analyse_exchange(net(); zone = ["VL2_0"], box = box, monitored = mon,
+                           bound = :discretization, certify = :never).certificate === nothing
+
     @test_throws ArgumentError analyse_exchange(net(); zone = ["VL2_0"], box = box,
                                                 monitored = mon, bound = :nope)
     @test_throws ArgumentError analyse_exchange(net(); zone = ["VL2_0"], box = box,
-                                                monitored = mon, certify = :nope)
+                                                monitored = mon, certify = 7)
+end
+
+@testset "max_exchange: the discretization route agrees with the cut programme" begin
+    box = Dict("VL2_0" => (-1000.0, 0.0))
+    mon = Dict("L12" => 150.0)
+    cuts = max_exchange(build_corridor(; g1max = 300.0); zone = ["VL2_0"], box = box, monitored = mon)
+    disc = max_exchange(build_corridor(; g1max = 300.0); zone = ["VL2_0"], box = box, monitored = mon,
+                        method = :discretization)
+    @test disc.emax ≈ cuts.emax atol = 0.05
+    @test disc.emax >= cuts.emax - 1e-6        # the master closes on the frontier from above
+    @test disc.iterations > 1                  # …over several master rounds, not one solve
+    @test cuts.iterations == 1
+    @test_throws ArgumentError max_exchange(build_corridor(); zone = ["VL2_0"], box = box,
+                                            monitored = mon, method = :nope)
 end
 
 @testset "Monitored screening reaches the search unchanged" begin

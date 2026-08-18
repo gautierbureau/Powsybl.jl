@@ -234,9 +234,11 @@ in the worst case, for a fixed preventive dispatch.
 * `box`  — per-bus deviation bounds `Dict(bus => (lo, hi))`, bounding how an exchange may be
   *composed*; the exchange itself is what is maximised.
 * `method` — `:cuts` (default) makes the exchange the *objective*: one solve returns the smallest
-  exchange at which correction fails, which **is** the frontier. `:bisection` instead probes
-  transfer levels with the security oracle; it is slower and only as accurate as `tol`, and is
-  kept as an independent cross-check.
+  exchange at which correction fails, which **is** the frontier. `:discretization` is the
+  reference's own route — a master maximising the exchange over collected scenarios, alternating
+  with a balanced medial ([`PowsyblWorstCase.discretization_exchange`](@ref)) — and approaches the
+  same value from above. `:bisection` probes transfer levels with the security oracle; it is
+  slower and only as accurate as `tol`. The last two are kept as independent cross-checks.
 * everything else is forwarded to [`PowsyblWorstCase.worst_case_oracle`](@ref).
 
 The copper-plate interval bounds the search in either case.
@@ -246,6 +248,17 @@ function max_exchange(network; zone, box::AbstractDict, monitored::AbstractDict,
                       method::Symbol = :cuts, tol = 1e-2, oracle_kwargs...)
     zone = collect(String, zone)
     lo_cp, hi_cp = copperplate_exchange_interval(network, zone; participation = participation, slack = slack)
+    if method === :discretization
+        cap = emax_cap === nothing ? hi_cp : min(hi_cp, emax_cap)
+        isfinite(cap) || throw(ArgumentError("unbounded exchange search: pass `emax_cap` or give " *
+                                             "the responding generators finite limits"))
+        e, iters, _ = W.discretization_exchange(network; zone = zone, uncertain = box,
+                                                monitored = monitored, e_cap = cap,
+                                                participation = participation, slack = slack,
+                                                oracle_kwargs...)
+        return ExchangeResult(e, (lo_cp, hi_cp), e > 0.0,
+                              Dict{String,Float64}(n => 0.0 for n in keys(box)), iters)
+    end
     if method === :cuts
         cap = emax_cap === nothing ? hi_cp : min(hi_cp, emax_cap)
         isfinite(cap) || throw(ArgumentError("unbounded exchange search: pass `emax_cap` or give " *
@@ -258,7 +271,8 @@ function max_exchange(network; zone, box::AbstractDict, monitored::AbstractDict,
         e, v = r
         return ExchangeResult(e, (lo_cp, hi_cp), e > 0.0, v, 1)
     end
-    method === :bisection || throw(ArgumentError("unknown method $(method); use :cuts or :bisection"))
+    method === :bisection ||
+        throw(ArgumentError("unknown method $(method); use :cuts, :discretization or :bisection"))
     last_worst = Ref(Dict{String,Float64}(n => 0.0 for n in keys(box)))
     iters = Ref(0)
     # import is a *negative* injection deviation in the zone, so an import cap of `e` is the
@@ -479,7 +493,8 @@ Result of [`analyse_exchange`](@ref) — the whole pipeline in one record.
 * `kept` / `dropped` — the monitored set after screening, and what it removed.
 * `secure_at_zero` — whether the grid holds at the forecast exchange at all.
 * `certificate` — the verdict on the reported range, when one was produced.
-* `status` — `:insecure_at_zero`, `:exact` (a single frontier solve), or `:bracketed`.
+* `status` — `:insecure_at_zero`, `:exact` (a single frontier solve), `:bracketed`, or
+  `:discretized` (the master/medial loop).
 """
 struct AnalysisResult
     emax::Float64
@@ -503,13 +518,16 @@ the frontier, and the certificate.
 * `screen` — `false`, `:bounds` or `:lp`, passed to
   [`PowsyblWorstCase.screen_monitored`](@ref). Screening happens **once**, here, and the reduced
   set is what every later stage sees.
-* `bound` — `:exact` for the single frontier solve, or `:bracket` to enclose it between an
-  achievable and a certified value ([`exchange_bracket`](@ref)). `emax` is the frontier in the
-  first case and the *achievable* bound in the second, so it is a transfer that holds either way.
-* `certify` — `:auto` (certify only when the bounding did not settle the answer exactly),
-  `:always`, or `:never`. This is the reference's `--force-worst-case-gen`; its levels 0 and 1
-  differ only in whether the balanced medial finished, which ours does by construction, so they
-  collapse into `:auto`.
+* `bound` — `:exact` for the single frontier solve, `:bracket` to enclose the answer between an
+  achievable and a certified value ([`exchange_bracket`](@ref)), or `:discretization` for the
+  reference's master/medial loop. `emax` is the frontier in the first case, the *achievable* bound
+  in the second, and the master's converged candidate in the third.
+* `certify` — the reference's `--force-worst-case-gen`, by the same three levels:
+  `0` certifies only when the bounding could not settle the answer; `1` (the default, and theirs)
+  additionally certifies whenever the **balanced** medial was used, because a balanced search
+  prices a low exchange and so says nothing about the ends of the range; `2` always certifies.
+  `:never` skips it entirely — there is no reference equivalent, but a caller that only wants the
+  number should not have to pay for the sweep. `:auto` and `:always` alias `1` and `2`.
 
 The pipeline stops early where the reference does: if the grid is already insecure at zero
 exchange there is no frontier to look for, and `emax` is 0.
@@ -517,13 +535,15 @@ exchange there is no frontier to look for, and `emax` is 0.
 Remaining keywords are those of [`max_exchange`](@ref) and are forwarded to the oracle.
 """
 function analyse_exchange(network; zone, box::AbstractDict, monitored::AbstractDict,
-                          screen = false, bound::Symbol = :exact, certify::Symbol = :auto,
+                          screen = false, bound::Symbol = :exact, certify = 1,
                           participation = nothing, slack = nothing, emax_cap = nothing,
                           init_restriction = 0.05, reduction = 0.25, tol = 1e-2, max_rounds = 8,
                           extension = 0.0, oracle_kwargs...)
-    bound in (:exact, :bracket) || throw(ArgumentError("bound must be :exact or :bracket"))
-    certify in (:auto, :always, :never) ||
-        throw(ArgumentError("certify must be :auto, :always or :never"))
+    bound in (:exact, :bracket, :discretization) ||
+        throw(ArgumentError("bound must be :exact, :bracket or :discretization"))
+    level = certify === :never ? -1 : certify === :auto ? 1 : certify === :always ? 2 : certify
+    level isa Integer && -1 <= level <= 2 ||
+        throw(ArgumentError("certify must be 0, 1, 2, :never, :auto or :always"))
     zone = collect(String, zone)
 
     # 1. copper plate — the interval any answer must lie in, and the cap on the search
@@ -544,7 +564,7 @@ function analyse_exchange(network; zone, box::AbstractDict, monitored::AbstractD
                                participation = participation, slack = slack,
                                exchange = (buses = zone, lo = 0.0, hi = 0.0), oracle_kwargs...)
     if !W.is_secure(init)
-        cert = certify === :never ? nothing :
+        cert = level < 0 ? nothing :
                certifying_scenario(network; zone = zone, box = box, monitored = kept, emax = 0.0,
                                    participation = participation, slack = slack,
                                    oracle_kwargs...)
@@ -552,8 +572,9 @@ function analyse_exchange(network; zone, box::AbstractDict, monitored::AbstractD
                               false, cert, :insecure_at_zero)
     end
 
-    # 5. the frontier, exactly or from both sides
+    # 5. the frontier — in one solve, from both sides, or by the master/medial loop
     br = nothing
+    balanced = false                         # was the answer produced by a *balanced* search?
     if bound === :bracket
         br = exchange_bracket(network; zone = zone, box = box, monitored = kept,
                               participation = participation, slack = slack, emax_cap = emax_cap,
@@ -561,6 +582,13 @@ function analyse_exchange(network; zone, box::AbstractDict, monitored::AbstractD
                               tol = tol, max_rounds = max_rounds, oracle_kwargs...)
         emax = br.lower                      # the side that is guaranteed achievable
         settled = br.upper - br.lower <= tol
+    elseif bound === :discretization
+        r = max_exchange(network; zone = zone, box = box, monitored = kept, method = :discretization,
+                         participation = participation, slack = slack, emax_cap = emax_cap,
+                         oracle_kwargs...)
+        emax = r.emax
+        settled = true
+        balanced = true                      # the medial priced a low exchange, so the ends are blind
     else
         emax = max_exchange(network; zone = zone, box = box, monitored = kept,
                             participation = participation, slack = slack, emax_cap = emax_cap,
@@ -568,15 +596,16 @@ function analyse_exchange(network; zone, box::AbstractDict, monitored::AbstractD
         settled = true                       # the cut formulation lands on the frontier
     end
 
-    # 6. certify the reported range
+    # 6. certify the reported range, on the reference's levels
     cert = nothing
-    if certify === :always || (certify === :auto && !settled)
+    if level == 2 || (level >= 0 && !settled) || (level >= 1 && balanced)
         cert = certifying_scenario(network; zone = zone, box = box, monitored = kept, emax = emax,
                                    extension = extension, participation = participation,
                                    slack = slack, oracle_kwargs...)
     end
     return AnalysisResult(emax, br, interval, sort!(collect(keys(kept))), dropped, true, cert,
-                          bound === :bracket ? :bracketed : :exact)
+                          bound === :bracket ? :bracketed :
+                          bound === :discretization ? :discretized : :exact)
 end
 
 end # module

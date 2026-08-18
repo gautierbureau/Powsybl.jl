@@ -81,9 +81,14 @@ what gets maximised.
 solve returns the **smallest exchange at which correction fails**, and since everything below that
 is correctable by construction, that value *is* the frontier. Internally the corrective menu is
 grown by verifying each candidate scenario against the full corrective freedom, so the answer is
-exact rather than tolerance-limited. Pass `method = :bisection` for the older level-probing search;
-it is slower and only as accurate as `tol`, and is kept as an independent cross-check (the tests
-assert the two agree).
+exact rather than tolerance-limited.
+
+Two other routes to the same number are kept as independent cross-checks, and the tests assert all
+three agree. `method = :discretization` is the reference's own: a master maximising the exchange
+over the scenarios collected so far, alternating with a **balanced medial** that hunts for the
+strongest cut — a violation at as low an exchange as it can find. It closes on the frontier from
+*above* over several rounds. `method = :bisection` probes transfer levels and is only as accurate
+as `tol`.
 
 Passing `restriction = ε` requires the grid to be secure *with a margin* rather than merely
 secure. The answer is then **conservative** — guaranteed achievable rather than sitting exactly on
@@ -167,8 +172,14 @@ early where the reference stops: if the grid is already insecure at the forecast
 no frontier to look for, and what comes back is the failing scenario.
 
 `bound = :exact` takes the single frontier solve, `:bracket` encloses it and reports the achievable
-side. `certify` mirrors `--force-worst-case-gen`: `:auto` certifies only when the bounding did not
-settle the answer exactly, `:always` and `:never` force it either way.
+side, `:discretization` runs the reference's master/medial loop.
+
+`certify` carries the reference's `--force-worst-case-gen` levels: `0` certifies only when the
+bounding could not settle the answer, `1` (the default, and theirs) additionally certifies whenever
+the **balanced** medial was used, and `2` always. That middle level is not ceremony — a balanced
+search prices a low exchange and so is blind at the ends of the range, which is precisely where the
+master's answer sits. On the corridor fixture it stops at 50.0057 against a true 50.0, and the
+certificate is what notices.
 
 ## The δ-parameterised region
 

@@ -55,6 +55,7 @@ with `x` the preventive actions (generator set-points). This is a three-level pr
 | Copper-plate bound / pre-filter | `PowsyblFlexibility.copperplate_bound`, `copperplate_exchange_interval` | the copper-plate feasibility interval |
 | Exchange parameterisation | `PowsyblWorstCase` `exchange=`, `PowsyblFlexibility.max_exchange` | the exchange variable the objectives are written in |
 | Two-sided bounding | `PowsyblFlexibility.exchange_bracket` | the `aux` restriction schedule |
+| Exchange master ↔ balanced medial | `PowsyblWorstCase.discretization_exchange` | `ulp` ↔ `mlp` (the `solve_lbd` / `solve_ubd` loop) |
 | Certifying scenario | `PowsyblFlexibility.certifying_scenario` | `wcgen` post-processing |
 | Monitored screening | `PowsyblWorstCase.screen_monitored` | the `filter` binary |
 | End-to-end driver | `PowsyblFlexibility.analyse_exchange` | `grid_solver::solve` (all `main.cpp` does is parse options and call it) |
@@ -211,17 +212,34 @@ with a modified objective and an extra constraint — which is why they share it
    halved (`red_g = 2`) as the iteration makes progress.
 
 `analyse_exchange` mirrors that shape: copper plate, bound tightening, screen, the security
-question at zero exchange (with the same early exit), the frontier — either the single exact solve
-or the two-sided bracket — and the certificate under a gate matching `--force-worst-case-gen`.
+question at zero exchange (with the same early exit), the frontier — the single exact solve, the
+two-sided bracket, or the master/medial loop — and the certificate under a gate matching
+`--force-worst-case-gen`.
 
-Two places where ours is deliberately shorter. The reference solves its preventive level first and
-tests *that* candidate; under a fixed dispatch — its own `assume_fixed_upper` — that degenerates
-into the security question at zero exchange, which is what our init stage asks. And its certificate
-gate has three levels whose first two differ only in whether the balanced medial finished; ours is
-exact by construction, so they collapse and the option is a plain `:auto` / `:always` / `:never`.
+**A correction to an earlier reading of this note.** The `ulp` is *not* a preventive-dispatch
+optimisation, and `assume_fixed_upper` does not switch it off (it only changes which bound gets
+recorded, at `grid_solver.cpp:500`). For `MAX_EXCHANGE` the `ulp` is the **Blankenship–Falk master
+over the exchange**:
 
-The restriction schedule is theirs: `exchange_bracket` now defaults to `init_res = 0.05` and a
-reduction of `1/4`, matching what `solve_aux` sets (`init_res` 0.05, `red_res` 4.0).
+```
+objective: −ulp_exchange_max                                   # i.e. maximise it
+forall d in ulp_disc:
+    ulp_exchange_cont_curr[d] ≥ ulp_exchange_max
+                               − BigE·(1 − ulp_ignore_disc[d])
+                               + ub_restrict·BigE
+forall d in ulp_disc:  ulp_unit_slack[d] ≤ ulp_ignore_disc[d]
+```
+
+Read it through the slack chain — `simple_line_bound_unit_slack[d] ≤ unit_slack[d] ≤
+ignore_disc[d]` — and it says: each stored point must either **satisfy its limits outright**
+(`ignore = 0`, no slack granted) or be **pushed to an exchange at or above the candidate**
+(`ignore = 1`). So the master maximises the exchange subject to every scenario collected so far
+being either correctable or out of range, and `ub_restrict` shifts the second branch up, making
+the answer conservative. That is a whole algorithm we did not have, not a step that degenerates.
+
+The restriction schedule is theirs: `exchange_bracket` defaults to `init_res = 0.05` and a
+reduction of `1/4`, matching what `solve_aux` sets (`init_res` 0.05, `red_res` 4.0), and
+`solve_ubd` runs its own `eps_g = 0.05` halved by `red_g = 2`.
 
 ### The AUX ∥ MLP race
 
@@ -247,13 +265,28 @@ worst limit violation at discretization point `d` (plus its ignore term), `E` fo
 
 | Program | Problem | Solved by |
 |---|---|---|
-| **`mlp`** (canonical) | `max min( min_d V[d] , 0.001·(E_max − E) )` | min–max |
+| **`mlp`** (canonical) | `max min( min_d V[d] , 0.001·(E_max − E) , 100·E )` | min–max |
 | **`wcgen`** | `max min_d V[d]`  s.t. `0 ≤ E ≤ E_max` | min–max (**same solver**) |
 | **`aux`** | `min E`  s.t. `V[d] ≥ ε_R  ∀d` | SIP-RRHS |
 
-* **`mlp`** maximises the *minimum* of the violation and a small term rewarding **low** exchange —
-  a deliberately **balanced** scenario search (low exchange *and* high violation). The main
-  program's help text names this directly ("balanced scenario generation").
+* **`mlp`** maximises the *minimum* of the violation and two caps: a small term rewarding **low**
+  exchange, and one forbidding an exchange near zero. A deliberately **balanced** scenario search
+  (low exchange *and* high violation) — the main program's help text names it directly.
+
+  This is not a flourish; it is what makes the loop move. A plain worst-violation search returns a
+  scenario sitting at the *top* of the allowed range, which cuts the master by nothing and stalls
+  it. The `0.001` cap prices a low exchange so the medial returns the strongest cut it can find,
+  and the `100·E` cap stops it collapsing onto the worthless scenario at zero. Both are
+  non-negative exactly on `0 ≤ E ≤ E_max`, so `obj > 0` still means precisely "a violation exists
+  strictly inside the range", which is the termination test. `PowsyblWorstCase.discretization_exchange`
+  implements the pair, and the weight is small on purpose: raising `0.001` *loosens* the cap, which
+  weakens the cuts — measured, `1e-2` fails to converge in 30 rounds where `1e-3` takes 8.
+
+  The blind spot is the flip side. A balanced medial says nothing about the **ends** of the range,
+  so the master stops a hair above the truth: on the corridor fixture it returns 50.0057 where the
+  cut programme returns 50.0 exactly. That is what "balanced scenario generation did not finish"
+  guards against, and why level 1 of `--force-worst-case-gen` asks for an unbalanced sweep
+  afterwards — our certificate catches exactly that overshoot (`φ = 3.8e-5` at `E = 50.0057`).
 * **`wcgen`** drops that balance term and instead *constrains* the exchange to the range, so it is
   the **pure worst-violation search** — the same quantity as our oracle's `φ`.
 * **`aux`** is the odd one out and is genuinely a different algorithm: it **minimises the
@@ -384,8 +417,9 @@ merit-order balancing with emergency reserve, discrete taps and border-inclusive
 covered, and the six-bus benchmark reproduces exactly. What is left is performance and scope:
 
 1. **Jointly optimising the preventive actions `x`** (`solve_esip_bnf` as the outer driver) — the
-   only level still missing entirely. It is disabled in the reference too, so treat it as
-   exploratory rather than parity work.
+   only level still missing. Note this is *not* the `ulp`, which is the exchange master and is now
+   covered; it is the `flexibility_solver` that `main.cpp` leaves commented out. Exploratory rather
+   than parity work.
 2. **Racing the two bounding legs** — `analyse_exchange` runs them in sequence; the reference runs
    `aux` and `mlp` concurrently, polling at 50 ms and aborting the loser once both bounds are done.
    Pure wall-clock, and it cannot change the answer. The design question is not the race but
