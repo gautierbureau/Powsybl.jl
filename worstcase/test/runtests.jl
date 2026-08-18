@@ -379,6 +379,44 @@ end
     @test !W.is_secure(above)
 end
 
+@testset "The exchange master and its balanced medial (the reference's route)" begin
+    # The reference does not put the exchange in the objective. A master maximises it over the
+    # scenarios collected so far, and a balanced medial hunts for the strongest cut below the
+    # candidate. The two routes must agree, and the master's approaches from above.
+    box = Dict("VL3_0" => (-400.0, 0.0))
+    mon = Dict("L12a" => 110.0)
+    base = 200.0 * 500 / 700 * (291.67 / 591.67)
+    exact = (110.0 - base) / (base / 200)          # ≈ 112.40
+
+    e, iters, cuts = W.discretization_exchange(build_ext(); zone = ["VL3_0"], uncertain = box,
+                                               monitored = mon, e_cap = 400.0)
+    @test e ≈ exact atol = 0.05
+    @test e >= exact - 1e-6                        # an outer approximation ⇒ never below the truth
+    @test length(cuts) >= 3
+    @test issorted(cuts, rev = true)               # each cut strictly improves on the last
+    @test cuts[1] > exact
+    @test cuts[end] ≈ e atol = 1e-6
+    @test iters < 30                               # converged rather than exhausting the budget
+
+    # And it agrees with the one-solve cut programme, which is the point of keeping both.
+    c, _ = W.min_violating_exchange(build_ext(); zone = ["VL3_0"], uncertain = box,
+                                    monitored = mon, e_cap = 400.0)
+    @test e ≈ c atol = 0.05
+
+    # `ub_restrict` walks the candidate down each round, so the answer comes back conservative.
+    r, _, _ = W.discretization_exchange(build_ext(); zone = ["VL3_0"], uncertain = box,
+                                        monitored = mon, e_cap = 400.0, restriction = 0.02)
+    @test r < e - 1.0
+    @test W.is_secure(W.worst_case_oracle(build_ext(); uncertain = box, monitored = mon,
+                exchange = (buses = ["VL3_0"], lo = -r, hi = 0.0)))
+
+    # The low-exchange cap is small on purpose: it prices a low exchange, and the *looser* it is
+    # the weaker the cuts, so a heavier weight converges more slowly rather than faster.
+    _, slow, _ = W.discretization_exchange(build_ext(); zone = ["VL3_0"], uncertain = box,
+                                           monitored = mon, e_cap = 400.0, balance_low = 1e-2)
+    @test slow > iters
+end
+
 @testset "Restriction has one meaning across both formulations" begin
     # `restriction` is a security margin everywhere: tightening it must move the reported frontier
     # *down* whichever way it is computed. (It previously moved the cut formulation the wrong way.)

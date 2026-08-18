@@ -42,7 +42,8 @@ using LinearAlgebra: inv
 const NET = Powsybl.Network
 
 export GridModel, WorstCaseSolution, Binding, worst_case_oracle, is_secure, zone_exchange,
-       min_violating_exchange, screen_monitored, max_overload_ratios, filter_ratio, flow_bounds
+       min_violating_exchange, discretization_exchange, screen_monitored, max_overload_ratios,
+       filter_ratio, flow_bounds
 
 # ---------------------------------------------------------------------------
 # Branches (lines, PSTs, HVDC) and generators
@@ -1159,6 +1160,149 @@ function _relaxed_medial(gm, states, monitored, uncertain, correctives, switchab
     @objective(model, Max, η)
     optimize!(model)
     return objective_value(model), Dict(n => value(v[n]) for n in keys(v))
+end
+
+# ---------------------------------------------------------------------------
+# The exchange master, and its balanced medial
+#
+# The reference does not put the exchange in the objective. It runs a Blankenship–Falk pair: an
+# outer program (`ulp`) that maximises the exchange subject to every scenario collected so far, and
+# a medial (`mlp`) that, at the candidate exchange, hunts for a scenario no corrective response can
+# fix. Each scenario found cuts the master down; when the medial finds none, the candidate is the
+# answer. Written out, the master constraint is
+#
+#     E_point[d] ≥ E_max − BigE·(1 − ignore[d]) + ub_restrict·BigE
+#
+# so each stored point must either satisfy its limits outright (`ignore = 0`, no slack is granted)
+# or be pushed to an exchange at or above the candidate (`ignore = 1`). Points reaching us are
+# already genuine violations, so only the second branch is ever live and the master reduces to
+# keeping the candidate below every cut — `ub_restrict` shifting it further down.
+#
+# The medial's objective is what makes the loop move, and it is easy to overlook:
+#
+#     max t   s.t.  t ≤ min_d violation[d],   t ≤ 0.001·(E_max − E),   t ≤ 100·E
+#
+# A plain worst-violation search would return a scenario sitting at the top of the allowed range,
+# cutting the master by nothing and stalling. The first cap prices a *low* exchange, so the medial
+# returns the strongest cut it can find rather than the largest violation; the second stops it
+# collapsing to the worthless scenario at zero. Both caps are non-negative exactly on `0 ≤ E ≤
+# E_max`, so `t > 0` still means precisely "a violation exists strictly inside the range" — which
+# is the termination test.
+#
+# The flip side, and the reason the reference keeps a certificate pass on a force level: a balanced
+# medial says nothing about the *ends* of the range. That is what "balanced scenario generation did
+# not finish" means, and why level 1 asks for an unbalanced sweep afterwards.
+# ---------------------------------------------------------------------------
+"""
+    discretization_exchange(network; zone, uncertain, monitored, e_cap, ...) -> (emax, iterations, cuts)
+
+Largest securable zone exchange, by the reference's route: a master maximising the exchange over
+the scenarios collected so far, alternating with a **balanced medial** that looks for the strongest
+cut — a violation at as low an exchange as it can find.
+
+`balance_low` and `balance_high` are the two caps on the medial objective (`0.001` and `100` in the
+reference). `restriction` is its `ub_restrict`, shifting the master's candidate down by
+`restriction · e_cap` each round so the answer comes back conservative.
+
+Returns the exchange, the number of master iterations, and the cuts that produced it. This is an
+independent route to what [`min_violating_exchange`](@ref) obtains in one solve — slower, and the
+reason to keep it is that agreement between two different algorithms is worth more than either.
+"""
+function discretization_exchange(network;
+                                 zone, uncertain::AbstractDict, monitored::AbstractDict, e_cap::Real,
+                                 correctives = String[], contingencies = String[],
+                                 participation::Union{Nothing,AbstractDict} = nothing,
+                                 hvdc = NamedTuple[], switchable = String[],
+                                 pst_limits::AbstractDict = Dict{String,Float64}(),
+                                 pst_model::AbstractDict = Dict{String,Any}(),
+                                 uncertain_generators = NamedTuple[], auto_bigM = true,
+                                 emergency = String[], discrete = String[],
+                                 slack::Union{Nothing,String} = nothing,
+                                 optimizer = HiGHS.Optimizer, restriction = 0.0, tol = 1e-5,
+                                 direction = -1.0, offset = 0.0, screen = false,
+                                 balance_low = 1e-3, balance_high = 100.0,
+                                 max_iter = 30, menu_iter = 30, bigM = 1e4, balance_bigM = 1e5,
+                                 silent = true)
+    gm = GridModel(network; slack = slack)
+    for h in hvdc
+        push!(gm.branches, Hvdc(h.id, h.bus1, h.bus2, h.p_zero, h.k, h.p_lim))
+    end
+    _check_monitored(gm, monitored)
+    conts = collect(String, contingencies)
+    if screen !== false
+        monitored, _ = screen_monitored(gm, monitored, conts; restriction = restriction,
+                                        method = (screen === true ? :bounds : screen),
+                                        uncertain = uncertain, ugens = collect(uncertain_generators),
+                                        participation = participation, pst_limits = pst_limits,
+                                        pst_model = pst_model, correctives = correctives,
+                                        switchable = switchable, emergency = emergency,
+                                        optimizer = optimizer, silent = silent)
+    end
+    correctives = collect(String, correctives)
+    switch = Set(collect(String, switchable))
+    states = _states(conts)
+    zone = collect(String, zone)
+    ugens = collect(uncertain_generators)
+    bigMs = auto_bigM ? branch_bigM(gm, conts; uncertain = uncertain, ugens = ugens,
+                                    participation = participation, pst_limits = pst_limits,
+                                    pst_model = pst_model) : Dict{String,Float64}()
+    Cand = Dict{Tuple{String,String},NamedTuple{(:alpha, :open),Tuple{Float64,Bool}}}
+
+    emax = float(e_cap)
+    cuts = Float64[]
+    for k in 1:max_iter
+        # MEDIAL: the strongest cut available below the current candidate. The corrective menu is
+        # grown exactly as in the cut programme — a candidate scenario is only believed once the
+        # full corrective freedom has failed to fix it.
+        menu = Cand[Cand()]
+        cut = nothing
+        for _ in 1:menu_iter
+            model = Model(optimizer); silent && set_silent(model)
+            v = _uncertainty_model!(model, uncertain, ugens)
+            E = @variable(model, base_name = "E"); set_lower_bound(E, 0.0); set_upper_bound(E, emax)
+            @constraint(model, zone_exchange(v, (buses = zone,)) == direction * E + offset)
+            inj_unc, inj_nom, drop_slack = _injection_model!(model, gm, participation, v, balance_bigM; emergency = emergency)
+            η = @variable(model, base_name = "eta")
+            for (j, cand) in enumerate(menu)
+                sel = VariableRef[]
+                _build_program!(model, gm, states, monitored, correctives, switch, pst_limits, pst_model,
+                                inj_unc, inj_nom, drop_slack, bigM, "d$(j)_",
+                                (pid, c) -> (haskey(cand, (pid, c)) ? cand[(pid, c)].alpha : nothing),
+                                (pid, c) -> (haskey(cand, (pid, c)) ? cand[(pid, c)].open : nothing),
+                                function (o, _)
+                                    b = @variable(model, binary = true); push!(sel, b)
+                                    @constraint(model, η <= o + bigM * (1 - b))
+                                end; bigMs = bigMs)
+                @constraint(model, sum(sel) == 1)
+            end
+            # the two balance caps: prefer a low exchange, but not the worthless one at zero
+            @constraint(model, η <= balance_low * (emax - E))
+            @constraint(model, η <= balance_high * E)
+            @objective(model, Max, η)
+            optimize!(model)
+            termination_status(model) == MOI.OPTIMAL || break
+            objective_value(model) <= -restriction + tol && break   # nothing violates inside
+            vstar = Dict(n => value(v[n]) for n in keys(v))
+            e = value(E)
+            phi, ac, _ = _corrective_response(gm, states, monitored, correctives, switch, conts,
+                                              participation, pst_limits, pst_model, vstar,
+                                              optimizer, silent, bigM, balance_bigM, bigMs,
+                                              emergency, discrete)
+            if phi > -restriction - tol
+                cut = e                                # a genuine violation at this exchange
+                break
+            end
+            push!(menu, ac)                            # correctable ⇒ enrich and retry
+        end
+        cut === nothing && return (emax, k, cuts)      # medial found nothing: the candidate holds
+        push!(cuts, cut)
+        # MASTER: keep the candidate below every cut, shifted down by the restriction.
+        next = cut - restriction * e_cap
+        next >= emax - tol && (next = emax - max(tol, restriction * e_cap))   # always make progress
+        emax = max(0.0, next)
+        emax <= tol && return (0.0, k, cuts)
+    end
+    return (emax, max_iter, cuts)
 end
 
 # ---------------------------------------------------------------------------
