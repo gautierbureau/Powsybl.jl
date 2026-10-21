@@ -209,6 +209,31 @@ end
     @test stay.phi ≈ (200.0 * 500 / 700) / 150.0 - 1 atol = 5e-3   # L12a ≈ 142.86 MW, PST stays
 end
 
+@testset "PST activation is border-inclusive (both branches admitted at |P| = P^act)" begin
+    # The activation dichotomy is written with non-strict big-M inequalities on both sides, so a
+    # state sitting exactly on the threshold |P^{N-1}| = P^act admits *both* the active and the
+    # inactive branch; the solver then takes whichever suits the objective. Pinned here from both
+    # sides, because a one-sided check cannot tell inclusiveness from a tie-break convention.
+    nat = 200.0 * 320 / 1120            # ≈ 57.14 MW PST corridor flow after L_B out
+    orc(mon, pact) = W.worst_case_oracle(build_ext(); uncertain = NO_UNC, monitored = mon,
+            contingencies = ["L_B"],
+            pst_model = Dict("PST_T" => (p_lim = 300.0, p_act = pact, p_tar = 30.0)))
+
+    # Monitoring the PST itself makes *activating* the favourable branch: regulating to 30 MW sits
+    # inside the 40 MW rating, riding at 57 MW does not.
+    monP = Dict("PST_T" => (base = 1e4, contingency = 1e4, corrective = 40.0))
+    @test orc(monP, nat - 1.0).phi ≈ 30.0 / 40.0 - 1 atol = 5e-3      # below: must activate
+    @test orc(monP, nat).phi       ≈ 30.0 / 40.0 - 1 atol = 5e-3      # on the border: may activate
+    @test orc(monP, nat + 1.0).phi ≈ nat / 40.0 - 1 atol = 5e-3       # above: cannot activate
+
+    # Monitoring the parallel line flips the preference: regulating the corridor down to 30 MW
+    # pushes 170 MW onto L12a, whereas staying inactive leaves it at 142.86 MW.
+    monL = Dict("L12a" => (base = 1e4, contingency = 1e4, corrective = 150.0))
+    @test orc(monL, nat - 1.0).phi ≈ 170.0 / 150.0 - 1 atol = 5e-3            # below: forced active
+    @test orc(monL, nat).phi ≈ (200.0 * 500 / 700) / 150.0 - 1 atol = 5e-3    # border: may stay inactive
+    @test orc(monL, nat + 1.0).phi ≈ (200.0 * 500 / 700) / 150.0 - 1 atol = 5e-3  # above: inactive
+end
+
 # Two B1→B3 corridors, each through a PST: corridor A via PST_T (full automaton) and corridor F
 # via PST_F (a *free* corrective the operator controls). Outaging L_B loads both corridors.
 function build_two_pst()
@@ -352,4 +377,444 @@ end
                 exchange = (buses = ["VL3_0"], lo = -(frontier + 1.0), hi = 0.0))
     @test W.is_secure(below)
     @test !W.is_secure(above)
+end
+
+@testset "The exchange master and its balanced medial (the reference's route)" begin
+    # The reference does not put the exchange in the objective. A master maximises it over the
+    # scenarios collected so far, and a balanced medial hunts for the strongest cut below the
+    # candidate. The two routes must agree, and the master's approaches from above.
+    box = Dict("VL3_0" => (-400.0, 0.0))
+    mon = Dict("L12a" => 110.0)
+    base = 200.0 * 500 / 700 * (291.67 / 591.67)
+    exact = (110.0 - base) / (base / 200)          # ≈ 112.40
+
+    e, iters, cuts = W.discretization_exchange(build_ext(); zone = ["VL3_0"], uncertain = box,
+                                               monitored = mon, e_cap = 400.0)
+    @test e ≈ exact atol = 0.05
+    @test e >= exact - 1e-6                        # an outer approximation ⇒ never below the truth
+    @test length(cuts) >= 3
+    @test issorted(cuts, rev = true)               # each cut strictly improves on the last
+    @test cuts[1] > exact
+    @test cuts[end] ≈ e atol = 1e-6
+    @test iters < 30                               # converged rather than exhausting the budget
+
+    # And it agrees with the one-solve cut programme, which is the point of keeping both.
+    c, _ = W.min_violating_exchange(build_ext(); zone = ["VL3_0"], uncertain = box,
+                                    monitored = mon, e_cap = 400.0)
+    @test e ≈ c atol = 0.05
+
+    # `ub_restrict` walks the candidate down each round, so the answer comes back conservative.
+    r, _, _ = W.discretization_exchange(build_ext(); zone = ["VL3_0"], uncertain = box,
+                                        monitored = mon, e_cap = 400.0, restriction = 0.02)
+    @test r < e - 1.0
+    @test W.is_secure(W.worst_case_oracle(build_ext(); uncertain = box, monitored = mon,
+                exchange = (buses = ["VL3_0"], lo = -r, hi = 0.0)))
+
+    # The low-exchange cap is small on purpose: it prices a low exchange, and the *looser* it is
+    # the weaker the cuts, so a heavier weight converges more slowly rather than faster.
+    _, slow, _ = W.discretization_exchange(build_ext(); zone = ["VL3_0"], uncertain = box,
+                                           monitored = mon, e_cap = 400.0, balance_low = 1e-2)
+    @test slow > iters
+end
+
+@testset "Restriction has one meaning across both formulations" begin
+    # `restriction` is a security margin everywhere: tightening it must move the reported frontier
+    # *down* whichever way it is computed. (It previously moved the cut formulation the wrong way.)
+    box = Dict("VL3_0" => (-400.0, 0.0))
+    mon = Dict("L12a" => 110.0)
+    frontier(r) = W.min_violating_exchange(build_ext(); zone = ["VL3_0"], uncertain = box,
+                                           monitored = mon, e_cap = 400.0, restriction = r)[1]
+    e0, e1 = frontier(0.0), frontier(0.1)
+    @test e1 < e0                              # a margin costs transfer, as in the oracle
+    # and the conservative frontier really is secure by the oracle's own restricted test
+    sol = W.worst_case_oracle(build_ext(); uncertain = box, monitored = mon, restriction = 0.1,
+                              exchange = (buses = ["VL3_0"], lo = -(e1 - 0.5), hi = 0.0))
+    @test W.is_secure(sol)
+end
+
+@testset "The reported overload names the element it was attained on" begin
+    # φ alone says how badly the grid fails; the binding element says where, which is what makes a
+    # reported value checkable rather than merely asserted.
+    # (1) base state, no contingency: L12a carries ≈ 70.4 MW forward against a 55 MW rating, and
+    # extra load at B3 pushes it higher still — which the nominal state, being free of uncertainty,
+    # does not see, so the base state is strictly the worse of the two and binds unambiguously.
+    sol = W.worst_case_oracle(build_ext(); uncertain = Dict("VL3_0" => (-100.0, 0.0)),
+                monitored = Dict("L12a" => (base = 55.0, contingency = 1e4, corrective = 1e4)))
+    @test sol.binding !== nothing
+    @test sol.binding.branch == "L12a"
+    @test sol.binding.state == :base
+    @test sol.binding.outage === nothing
+    @test sol.binding.direction == :forward
+
+    # (2) the same monitor tightened only post-contingency moves the binding element into the
+    # N-1 state of L_B, and the outage is named with it.
+    n1 = W.worst_case_oracle(build_ext(); uncertain = NO_UNC, contingencies = ["L_B"],
+                monitored = Dict("L12a" => (base = 1e4, contingency = 110.0, corrective = 1e4)))
+    @test !W.is_secure(n1)
+    @test n1.binding.branch == "L12a"
+    @test n1.binding.state == :contingency
+    @test n1.binding.outage == "L_B"
+
+    # (3) a reverse-direction overload is reported as such: with the flow running forward, an
+    # asymmetric rating that is tight on the *reverse* side is not what binds.
+    rev = W.worst_case_oracle(build_ext(); uncertain = Dict("VL3_0" => (0.0, 400.0)),
+                monitored = Dict("L12a" => (-55.0, 1e4)))
+    @test !W.is_secure(rev)
+    @test rev.binding.direction == :reverse       # the surplus reverses the corridor
+end
+
+@testset "Monitored-branch screening (drop what cannot fail)" begin
+    # The flow bounds over-estimate what a branch can carry, so a branch whose bound cannot reach
+    # its rating can never be the one that fails, in any state, and need not be in the model at all.
+    # Bounds on this fixture (L_B contingency, load uncertainty at B3, G1+G2 responding):
+    #   L12a 396   L1_2a 203   L2b_3 450   L_B 508   PST_T 203
+    gm = W.GridModel(build_ext())
+    box = Dict("VL3_0" => (-200.0, 0.0))
+    part = Dict("G1" => 1.0, "G2" => 1.0)
+    mon = Dict{String,Any}("L12a" => 110.0, "L1_2a" => 1e4, "L2b_3" => 600.0,
+                           "L_B" => 1e4, "PST_T" => 500.0)
+    kept, dropped = W.screen_monitored(gm, mon, ["L_B"]; uncertain = box, participation = part)
+    @test collect(keys(kept)) == ["L12a"]                      # only the 110 MW monitor can bind
+    @test dropped == ["L1_2a", "L2b_3", "L_B", "PST_T"]
+
+    # The verdict and the value are untouched: φ was attained on a branch the screen keeps.
+    full   = W.worst_case_oracle(build_ext(); uncertain = box, monitored = mon,
+                                 contingencies = ["L_B"], participation = part)
+    thin   = W.worst_case_oracle(build_ext(); uncertain = box, monitored = mon,
+                                 contingencies = ["L_B"], participation = part, screen = true)
+    @test W.is_secure(full) == W.is_secure(thin)
+    @test thin.phi ≈ full.phi atol = 1e-6
+    @test thin.binding.branch == full.binding.branch
+
+    # …and so is the frontier, which by construction cannot depend on branches that never fail.
+    fbox = Dict("VL3_0" => (-400.0, 0.0))          # wide enough for the frontier to sit inside
+    fe(sc) = W.min_violating_exchange(build_ext(); zone = ["VL3_0"], uncertain = fbox,
+                monitored = mon, e_cap = 400.0, screen = sc)[1]
+    @test fe(true) ≈ fe(false) atol = 1e-6
+    @test fe(true) ≈ 112.4 atol = 0.5              # the same frontier the unscreened test pins
+
+    # A demanded margin means failing takes less flow, so the screen has to keep more.
+    lax, _ = W.screen_monitored(gm, mon, ["L_B"]; uncertain = box, participation = part)
+    strict, _ = W.screen_monitored(gm, mon, ["L_B"]; uncertain = box, participation = part,
+                                   restriction = 0.9)
+    @test length(strict) > length(lax)
+    @test haskey(strict, "L2b_3")                              # 450/600 = 0.75 ≥ 1 − 0.9
+
+    # The kept set is never empty: with nothing able to bind, the least slack branch is retained so
+    # the reported φ still refers to something.
+    loose = Dict{String,Any}("L1_2a" => 1e4, "L_B" => 1e4)
+    k2, d2 = W.screen_monitored(gm, loose, ["L_B"]; uncertain = box, participation = part)
+    @test length(k2) == 1 && length(d2) == 1
+    @test collect(keys(k2)) == ["L_B"]                         # 508/1e4 beats 203/1e4
+    @test W.is_secure(W.worst_case_oracle(build_ext(); uncertain = box, monitored = loose,
+                contingencies = ["L_B"], participation = part, screen = true))
+end
+
+@testset "Screening by arithmetic and by optimisation (the reference's filter)" begin
+    # Two ways to over-estimate the worst ratio a branch can reach. `:bounds` is interval
+    # arithmetic on the flow bounds — every bus free to take its worst injection independently.
+    # `:lp` maximises the ratio over the model itself, so balance across buses is enforced and the
+    # corrective controls are free and maximised (which is what keeps it an over-estimate).
+    gm = W.GridModel(build_ext())
+    box = Dict("VL3_0" => (-200.0, 0.0))
+    part = Dict("G1" => 1.0, "G2" => 1.0)
+    mon = Dict{String,Any}("L12a" => 110.0, "L1_2a" => 1e4, "L2b_3" => 600.0,
+                           "L_B" => 1e4, "PST_T" => 500.0)
+    rb = W.max_overload_ratios(gm, mon, ["L_B"]; uncertain = box, participation = part)
+    rl = W.max_overload_ratios(gm, mon, ["L_B"]; method = :lp, uncertain = box, participation = part)
+
+    # Both are sound, and enforcing balance is worth roughly a factor of two here.
+    @test all(rl[k] <= rb[k] + 1e-9 for k in keys(mon))
+    @test rl["L12a"] ≈ 1.9481 atol = 1e-3      # bounds says 3.6021
+    @test rb["L12a"] ≈ 3.6021 atol = 1e-3
+    @test rl["L2b_3"] ≈ 0.5 atol = 1e-3        # 300 MW through a 600 MW rating
+    @test rb["L2b_3"] ≈ 0.75 atol = 1e-3
+
+    # Sound means: no smaller than what the model actually reaches. The oracle finds L12a at 1.5
+    # times its 110 MW rating post-contingency, and both estimates sit above that.
+    sol = W.worst_case_oracle(build_ext(); uncertain = box, monitored = mon,
+                              contingencies = ["L_B"], participation = part)
+    @test rl["L12a"] >= sol.phi + 1 - 1e-6
+    @test rb["L12a"] >= sol.phi + 1 - 1e-6
+
+    # The reference's `filter` reports one number for the whole set — the largest of these — and we
+    # get the element attaining it for free, since the per-branch values are computed anyway.
+    f, at = W.filter_ratio(gm, mon, ["L_B"]; uncertain = box, participation = part)
+    @test f ≈ maximum(values(rl)) atol = 1e-9
+    @test at.branch == "L12a" && at.state == :contingency && at.outage == "L_B"
+
+    # Where the tightness shows: a rating between the two estimates is kept by one and dropped by
+    # the other. L2b_3 carries at most 300 MW, but the arithmetic bound says 450.
+    mon2 = merge(mon, Dict{String,Any}("L2b_3" => 350.0))
+    kb, _ = W.screen_monitored(gm, mon2, ["L_B"]; uncertain = box, participation = part)
+    kl, _ = W.screen_monitored(gm, mon2, ["L_B"]; method = :lp, uncertain = box, participation = part)
+    @test haskey(kb, "L2b_3")                  # 450/350 = 1.29 ⇒ arithmetic cannot rule it out
+    @test !haskey(kl, "L2b_3")                 # 300/350 = 0.86 ⇒ optimisation can
+    @test issubset(keys(kl), keys(kb))
+
+    # …and the extra drop is safe: the verdict is the same however the set was screened.
+    verdict(m) = W.is_secure(W.worst_case_oracle(build_ext(); uncertain = box, monitored = mon2,
+                    contingencies = ["L_B"], participation = part, screen = m))
+    @test verdict(false) == verdict(:bounds) == verdict(:lp)
+end
+
+@testset "A misspelled monitored branch is rejected, not silently ignored" begin
+    # A state drops branches that are out in it, so the overload builder has to skip ids it cannot
+    # find — which used to swallow a typo as well, reporting a serene "secure" for a grid on which
+    # nothing was being monitored at all.
+    @test_throws ArgumentError W.worst_case_oracle(build_ext(); uncertain = NO_UNC,
+                monitored = Dict("L12" => 110.0))            # the real id is L12a
+    @test_throws ArgumentError W.min_violating_exchange(build_ext(); zone = ["VL3_0"],
+                uncertain = Dict("VL3_0" => (-400.0, 0.0)),
+                monitored = Dict("L12a" => 110.0, "nope" => 50.0), e_cap = 400.0)
+    # An id that only exists as an added HVDC branch is still legitimate.
+    hv = (id = "HV", bus1 = "VL1_0", bus2 = "VL3_0", p_zero = 0.0, k = 100.0, p_lim = 50.0)
+    @test W.worst_case_oracle(build_ext(with_LB = false); uncertain = NO_UNC,
+                monitored = Dict("HV" => 1e4), hvdc = [hv]) isa W.WorstCaseSolution
+end
+
+@testset "A signed restriction brackets the frontier from both sides" begin
+    # The restriction says what counts as failing, and its sign picks which side of the frontier
+    # the answer lands on: demand a margin and failure comes sooner, so the reported transfer is
+    # one that is certainly securable; tolerate an overload and failure comes later, so nothing
+    # above the reported transfer can be held. The exact value sits between the two.
+    box = Dict("VL3_0" => (-400.0, 0.0))
+    mon = Dict("L12a" => 110.0)
+    frontier(r) = W.min_violating_exchange(build_ext(); zone = ["VL3_0"], uncertain = box,
+                                           monitored = mon, e_cap = 400.0, restriction = r)[1]
+    base = 200.0 * 500 / 700 * (291.67 / 591.67)
+    exact = (110.0 - base) / (base / 200)
+
+    lo2, lo1, e0, hi1, hi2 = frontier(0.2), frontier(0.1), frontier(0.0), frontier(-0.1), frontier(-0.2)
+    @test e0 ≈ exact atol = 0.5
+    @test lo2 < lo1 < e0 < hi1 < hi2                     # monotone in the restriction
+    # Each side keeps its guarantee, checked against the oracle's own exact test.
+    @test W.is_secure(W.worst_case_oracle(build_ext(); uncertain = box, monitored = mon,
+                exchange = (buses = ["VL3_0"], lo = -lo1, hi = 0.0)))          # lower: achievable
+    @test !W.is_secure(W.worst_case_oracle(build_ext(); uncertain = box, monitored = mon,
+                exchange = (buses = ["VL3_0"], lo = -hi1, hi = 0.0)))          # upper: unreachable
+    # A tolerated overload is the oracle's relaxed test, so it accepts what the exact test rejects.
+    @test W.is_secure(W.worst_case_oracle(build_ext(); uncertain = box, monitored = mon,
+                restriction = -0.1, exchange = (buses = ["VL3_0"], lo = -(hi1 - 0.5), hi = 0.0)))
+end
+
+@testset "Exchange direction and zero point" begin
+    # `direction` picks the sense of the transfer and `offset` moves the reference the exchange is
+    # measured from — needed whenever the forecast exchange is not itself zero.
+    box = Dict("VL3_0" => (-400.0, 400.0))
+    mon = Dict("L12a" => 110.0)
+    f(dir, off) = W.min_violating_exchange(build_ext(); zone = ["VL3_0"], uncertain = box,
+                      monitored = mon, e_cap = 2000.0, direction = dir, offset = off)
+    imp = f(-1.0, 0.0)
+    @test imp !== nothing
+    # shifting the zero point moves the measured exchange one-for-one, same physical frontier
+    imp50 = f(-1.0, 50.0)
+    @test imp50 !== nothing
+    @test imp50[1] ≈ imp[1] + 50.0 atol = 0.5
+    @test imp50[2]["VL3_0"] ≈ imp[2]["VL3_0"] atol = 0.5   # same binding injection
+    # the opposite sense is a different frontier (the corridor reverses)
+    exp_ = f(+1.0, 0.0)
+    @test exp_ === nothing || !isapprox(exp_[1], imp[1]; atol = 1.0)
+end
+
+# ---------------------------------------------------------------------------
+# Reference six-bus benchmark
+#
+# A published instance with a closed-form maximum exchange. Per-unit on a 100 MVA base, expressed
+# here in MW so that h = V²/x equals 100/x_pu. The foreign region is {1,4,5}; its forecast
+# exchange is -731 MW, so the exchange is measured from that offset in either direction.
+# ---------------------------------------------------------------------------
+const REF_KV = 400.0
+ref_x(x_pu) = REF_KV^2 * x_pu / 100
+
+function build_ref6(; bb_pu = 20.0)
+    net = NET.create_empty("ref6")
+    NET.create_substations(net; id = ["S$i" for i in 1:6], country = fill("FR", 6))
+    NET.create_voltage_levels(net; id = ["VL$i" for i in 1:6], substation_id = ["S$i" for i in 1:6],
+        topology_kind = fill("BUS_BREAKER", 6), nominal_v = fill(REF_KV, 6))
+    NET.create_buses(net; id = ["B$i" for i in 1:6], voltage_level_id = ["VL$i" for i in 1:6])
+    for (id, f, t, xp) in [("SIMP1", 2, 1, 0.20215535), ("SIMP2", 3, 4, 0.07687),
+                           ("SIMP3", 1, 4, 0.51732935), ("SIMP4", 3, 2, 0.51732935),
+                           ("SIMP5", 6, 3, 0.15374),    ("SIMP6", 4, 5, 0.15374)]
+        NET.create_lines(net; id = [id], voltage_level1_id = ["VL$f"], bus1_id = ["B$f"],
+            voltage_level2_id = ["VL$t"], bus2_id = ["B$t"], r = [0.0], x = [ref_x(xp)],
+            g1 = [0.0], b1 = [0.0], g2 = [0.0], b2 = [0.0])
+    end
+    gid  = ["LOADG1", "GENC1", "GENC2", "GENC3", "LOADG2", "LOADG3", "GENU1", "GENU2"]
+    gbus = [1, 2, 2, 3, 4, 4, 1, 4]
+    NET.create_generators(net; id = gid, voltage_level_id = ["VL$b" for b in gbus],
+        bus_id = ["B$b" for b in gbus], energy_source = fill("OTHER", 8),
+        min_p = [0.0, 100.0, 100.0, 100.0, 0.0, 0.0, -100bb_pu, -100bb_pu],
+        max_p = [1000.0, 1500.0, 1500.0, 1500.0, 1000.0, 1000.0, 100bb_pu, 100bb_pu],
+        target_p = [577.0, 577.0, 577.0, 577.0, 346.0, 346.0, 0.0, 0.0],
+        target_v = fill(REF_KV, 8), target_q = fill(0.0, 8), voltage_regulator_on = fill(false, 8))
+    NET.create_loads(net; id = ["LOADC1", "LOADC2", "LOADC4"],
+        voltage_level_id = ["VL1", "VL2", "VL5"], bus_id = ["B1", "B2", "B5"],
+        p0 = [1000.0, 1000.0, 1000.0], q0 = [0.0, 0.0, 0.0])
+    return net
+end
+
+const REF_ZONE   = ["VL1_0", "VL4_0", "VL5_0"]
+const REF_OFFSET = 731.0                       # minus the forecast foreign exchange (-731 MW)
+const REF_BOX    = Dict("VL1_0" => (-100.0, 1100.0), "VL4_0" => (-100.0, 100.0))
+const REF_MON    = Dict("SIMP1" => (base = 600.0, contingency = 1000.0, corrective = 600.0),
+                        "SIMP2" => (base = 600.0, contingency = 1000.0, corrective = 600.0))
+const REF_PART   = Dict("GENC1" => 1/3, "GENC2" => 1/3, "GENC3" => 1/3)
+const REF_HVDC   = [(id = "HVDC1", bus1 = "VL5_0", bus2 = "VL6_0",
+                     k = 100 / 0.04848135, p_zero = 0.0, p_lim = 500.0)]
+ref_ugens(bb) = [(id = "GENU1", bus = "VL1_0", controllable = (-100bb, 100bb)),
+                 (id = "GENU2", bus = "VL4_0", controllable = (-100bb, 100bb))]
+
+@testset "Reference six-bus benchmark: the network" begin
+    gm = W.GridModel(build_ref6(); slack = "VL1_0")
+    h = Dict(b.id => b.h for b in gm.branches)
+    for (id, xp) in [("SIMP1", 0.20215535), ("SIMP2", 0.07687), ("SIMP3", 0.51732935),
+                     ("SIMP4", 0.51732935), ("SIMP5", 0.15374), ("SIMP6", 0.15374)]
+        @test h[id] ≈ 100 / xp rtol = 1e-9         # admittance in MW/rad
+    end
+    inj = W._nominal_injection(gm)
+    for (n, p) in ["VL1_0" => -423.0, "VL2_0" => 154.0, "VL3_0" => 577.0,
+                   "VL4_0" => 692.0, "VL5_0" => -1000.0, "VL6_0" => 0.0]
+        @test inj[n] ≈ p atol = 1e-6
+    end
+    @test sum(values(inj)) ≈ 0.0 atol = 1e-9       # the forecast balances
+end
+
+@testset "Reference six-bus benchmark: maximum exchange" begin
+    # Published values, in MW, for each balancing bound and transfer sense.
+    for (bb, dir, expected) in [(20.0, +1.0, 354.473), (20.0, -1.0, 991.046),
+                                ( 7.0, +1.0, 398.954), ( 7.0, -1.0, 1174.987)]
+        r = W.min_violating_exchange(build_ref6(; bb_pu = bb); zone = REF_ZONE, uncertain = REF_BOX,
+                uncertain_generators = ref_ugens(bb), monitored = REF_MON, e_cap = 3000.0,
+                participation = REF_PART, hvdc = REF_HVDC, slack = "VL1_0",
+                direction = dir, offset = REF_OFFSET)   # no hand-tuned big-M
+        @test r !== nothing
+        @test r[1] ≈ expected atol = 0.01          # inside the reference's own 1e-4 pu tolerance
+    end
+end
+
+@testset "Per-branch big-M bounds from the physics" begin
+    # The bounds must be valid — never below a flow the model can actually reach — and materially
+    # tighter than a single hand-picked constant.
+    gm = W.GridModel(build_ext(); slack = "VL1_0")
+    box = Dict("VL3_0" => (-200.0, 0.0))
+    M = W.branch_bigM(gm, ["L_B"]; uncertain = box,
+                      participation = Dict("G1" => 1.0, "G2" => 1.0))
+    @test Set(keys(M)) == Set(br.id for br in gm.branches)
+    @test all(v -> v > 0 && isfinite(v), values(M))
+
+    # Validity: the worst case the oracle actually finds must sit inside the bound. With L_B out
+    # the corridor carries ≈ 142.9 MW at forecast and more under the uncertainty; every branch
+    # bound must exceed the flows the model reaches, and the monitored limit it is compared to.
+    @test M["L12a"] > 200.0
+    @test M["PST_T"] > 0.0
+
+    # Tightness: far below the 1e4 default that was previously applied to every branch.
+    @test maximum(values(M)) < 1e4
+
+    # Answers must not depend on the bound: the automatic and a generous manual setting agree.
+    lim = (base = 110.0, contingency = 150.0, corrective = 110.0)
+    auto = W.worst_case_oracle(build_ext(); uncertain = NO_UNC, monitored = Dict("L12a" => lim),
+                               correctives = ["PST_T"], contingencies = ["L_B"])
+    manual = W.worst_case_oracle(build_ext(); uncertain = NO_UNC, monitored = Dict("L12a" => lim),
+                                 correctives = ["PST_T"], contingencies = ["L_B"],
+                                 auto_bigM = false, bigM = 1e4)
+    @test auto.phi ≈ manual.phi atol = 1e-6
+    @test W.is_secure(auto) == W.is_secure(manual)
+end
+
+@testset "Asymmetric per-direction limits" begin
+    # A branch may be rated differently each way. Base flow on L12a is positive and reaches
+    # ≈ 140.8 MW under the uncertainty, so only the forward rating can bind here.
+    unc = Dict("VL3_0" => (-200.0, 0.0))
+    sym  = W.worst_case_oracle(build_ext(); uncertain = unc, monitored = Dict("L12a" => 110.0))
+    pair = W.worst_case_oracle(build_ext(); uncertain = unc,
+                               monitored = Dict("L12a" => (-110.0, 110.0)))
+    @test pair.phi ≈ sym.phi atol = 1e-9        # (-r, r) is exactly the symmetric rating
+
+    # Relaxing only the reverse rating changes nothing: the forward one still binds.
+    fwd = W.worst_case_oracle(build_ext(); uncertain = unc,
+                              monitored = Dict("L12a" => (-1e4, 110.0)))
+    @test fwd.phi ≈ sym.phi atol = 1e-9
+    @test !W.is_secure(fwd)
+
+    # Relaxing the forward rating instead leaves the flow unconstrained in the direction it runs.
+    rev = W.worst_case_oracle(build_ext(); uncertain = unc,
+                              monitored = Dict("L12a" => (-110.0, 1e4)))
+    @test W.is_secure(rev)
+    @test rev.phi < sym.phi - 1.0
+
+    # Per-state ratings may be pairs too.
+    perstate = W.worst_case_oracle(build_ext(); uncertain = NO_UNC, contingencies = ["L_B"],
+        monitored = Dict("L12a" => (base = (-110.0, 110.0), contingency = (-1e4, 1e4),
+                                    corrective = (-110.0, 110.0))))
+    @test !W.is_secure(perstate)
+    @test perstate.phi ≈ N1_OVERLOAD atol = 1e-3   # only the post-corrective rating binds
+
+    @test_throws ArgumentError W.worst_case_oracle(build_ext(); uncertain = NO_UNC,
+        monitored = Dict("L12a" => (110.0, 220.0)))     # both positive is not a direction pair
+end
+
+@testset "Emergency reserve and merit order" begin
+    # G1 (200 MW, up to 1000) is the ordinary responding unit; G2 (50 MW, up to 150) is held as
+    # reserve. Reserve must stay put while G1 still has headroom, and engage only once it doesn't.
+    mon = Dict("L12a" => 110.0)
+    both = Dict("G1" => 1.0, "G2" => 1.0)
+
+    # 700 MW of extra load is within G1's 800 MW of headroom, so the reserve stays at its set
+    # point and the answer must equal the case where G2 does not participate at all.
+    unc700 = Dict("VL3_0" => (-700.0, 0.0))
+    reserve = W.worst_case_oracle(build_ext(); uncertain = unc700, monitored = mon,
+                                  participation = both, emergency = ["G2"])
+    g1only  = W.worst_case_oracle(build_ext(); uncertain = unc700, monitored = mon,
+                                  participation = Dict("G1" => 1.0))
+    shared  = W.worst_case_oracle(build_ext(); uncertain = unc700, monitored = mon,
+                                  participation = both)
+    @test reserve.phi ≈ g1only.phi atol = 5e-3      # held back: as if it did not respond
+    @test reserve.phi > shared.phi + 0.05           # …and strictly worse than sharing
+
+    # 850 MW exceeds G1's headroom, so the reserve must engage for the case to balance at all.
+    unc850 = Dict("VL3_0" => (-850.0, 0.0))
+    engaged = W.worst_case_oracle(build_ext(); uncertain = unc850, monitored = mon,
+                                  participation = both, emergency = ["G2"])
+    shared850 = W.worst_case_oracle(build_ext(); uncertain = unc850, monitored = mon,
+                                    participation = both)
+    @test isfinite(engaged.phi)
+    @test engaged.phi > reserve.phi                 # a larger deficit is worse
+    @test !isapprox(engaged.phi, shared850.phi; atol = 1e-3)   # reserve last ≠ sharing throughout
+
+    # A 700 MW deficit overloads the corridor however it is covered; sharing merely softens it.
+    @test shared.phi > 0
+    @test g1only.phi > shared.phi
+end
+
+@testset "Discrete tap positions for a corrective PST" begin
+    # Shifting the PST relieves L12a but loads the PST corridor itself, so the best corrective is
+    # an interior compromise rather than a bound — which is where discreteness actually bites.
+    mon = Dict("L12a"  => (base = 1e4, contingency = 1e4, corrective = 110.0),
+               "PST_T" => (base = 1e4, contingency = 1e4, corrective = 80.0))
+    kw = (uncertain = NO_UNC, monitored = mon, correctives = ["PST_T"], contingencies = ["L_B"])
+    cont = W.worst_case_oracle(build_ext(); kw...)
+    disc = W.worst_case_oracle(build_ext(); kw..., discrete = ["PST_T"])
+
+    taps = first(b for b in W.GridModel(build_ext()).branches if b isa W.Pst).taps
+    @test length(taps) == 21
+    @test rad2deg(taps[1]) ≈ -30.0 atol = 1e-9      # every 3° from −30 to +30
+    αc = cont.corrective["L_B"]["PST_T"]
+    αd = disc.corrective["L_B"]["PST_T"]
+
+    @test minimum(abs(αd - t) for t in taps) ≈ 0.0 atol = 1e-6   # lands on a real tap
+    @test minimum(abs(αc - t) for t in taps) > 1e-3              # the continuous one does not
+    @test rad2deg(αc) ≈ 10.856 atol = 5e-3
+    @test rad2deg(αd) ≈ 12.0 atol = 1e-3            # chosen, not rounded: 9° would be worse
+    @test disc.phi >= cont.phi - 1e-9               # discretising can only cost
+    @test disc.phi > cont.phi + 1e-3                # and here it does
+
+    # Where the continuous optimum already sits on a tap, the two agree exactly.
+    mon2 = Dict("L12a" => (base = 1e4, contingency = 1e4, corrective = 110.0))
+    kw2 = (uncertain = NO_UNC, monitored = mon2, correctives = ["PST_T"], contingencies = ["L_B"])
+    c2 = W.worst_case_oracle(build_ext(); kw2...)
+    d2 = W.worst_case_oracle(build_ext(); kw2..., discrete = ["PST_T"])
+    @test rad2deg(c2.corrective["L_B"]["PST_T"]) ≈ 30.0 atol = 1e-2
+    @test d2.phi ≈ c2.phi atol = 1e-6
 end

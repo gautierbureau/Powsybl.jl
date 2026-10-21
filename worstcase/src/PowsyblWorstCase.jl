@@ -37,10 +37,13 @@ using Powsybl
 using JuMP
 import HiGHS
 import DataFrames
+using LinearAlgebra: inv
 
 const NET = Powsybl.Network
 
-export GridModel, WorstCaseSolution, worst_case_oracle, is_secure, zone_exchange, min_violating_exchange
+export GridModel, WorstCaseSolution, Binding, worst_case_oracle, is_secure, zone_exchange,
+       min_violating_exchange, discretization_exchange, screen_monitored, max_overload_ratios,
+       filter_ratio, flow_bounds
 
 # ---------------------------------------------------------------------------
 # Branches (lines, PSTs, HVDC) and generators
@@ -59,7 +62,13 @@ struct Line <: Branch
     h::Float64             # DC susceptance V²/x
 end
 
-"A phase-shifting transformer: `P = h·(Δθ + α)`, `α` preventive or corrective."
+"""
+A phase-shifting transformer: `P = h·(Δθ + α)`, with `α` preventive or corrective.
+
+`taps` are the angles the physical tap changer can actually reach, ascending. A corrective angle
+is continuous within `[alpha_min, alpha_max]` unless the device is declared discrete, in which
+case it must land on one of them.
+"""
 struct Pst <: Branch
     id::String
     bus1::String
@@ -68,6 +77,7 @@ struct Pst <: Branch
     alpha0::Float64        # preventive angle (rad)
     alpha_min::Float64
     alpha_max::Float64
+    taps::Vector{Float64}
 end
 
 "An HVDC link in AC emulation: `P = clamp(P⁰ + K·Δθ, ±P^lim)`."
@@ -146,7 +156,7 @@ function GridModel(network; slack::Union{Nothing,String} = nothing)
         if id in pst_ids
             a = get(alphas, id, Float64[0.0])
             push!(branches, Pst(id, tfos[i, :bus1_id], tfos[i, :bus2_id], h, get(alpha0, id, 0.0),
-                                minimum(a), maximum(a)))
+                                minimum(a), maximum(a), sort(a)))
         else
             push!(branches, Line(id, tfos[i, :bus1_id], tfos[i, :bus2_id], h))
         end
@@ -165,12 +175,36 @@ _nominal_injection(gm::GridModel) =
 # Result
 # ---------------------------------------------------------------------------
 """
+    Binding
+
+Which monitored branch, in which state and which direction, attains the reported overload. This is
+what turns a number into a certificate: `φ` says how badly the grid fails, `Binding` says where.
+
+`state` is one of `:nominal`, `:base`, `:contingency`, `:corrective`; `outage` is the contingency
+the state belongs to (`nothing` for the first two); and `direction` is `:forward` when the flow ran
+against the upper rating, `:reverse` against the lower.
+"""
+struct Binding
+    branch::String
+    state::Symbol
+    outage::Union{Nothing,String}
+    direction::Symbol
+end
+
+function Base.show(io::IO, b::Binding)
+    print(io, "Binding(", b.branch, " @ ", b.state,
+          b.outage === nothing ? "" : "[$(b.outage)]", ", ", b.direction, ")")
+end
+
+"""
     WorstCaseSolution
 
 * `phi`            — the worst achievable overload `max_v min_{u_c} max_{e,s}` (`> 0` ⇒ insecure).
 * `secure`         — whether `phi ≤ tol`.
 * `worst_injection`— the worst-case injection deviation `v*` per uncertain bus (MW).
 * `corrective`     — best corrective PST angles (rad), per contingency: `Dict(cont => Dict(pst => α))`.
+* `binding`        — the [`Binding`](@ref) element `phi` was attained on: which monitored branch,
+  in which state and direction. `nothing` only when nothing was monitored.
 * `iterations`, `lower_bound`, `upper_bound`.
 """
 struct WorstCaseSolution
@@ -181,6 +215,7 @@ struct WorstCaseSolution
     iterations::Int
     lower_bound::Float64
     upper_bound::Float64
+    binding::Union{Nothing,Binding}
 end
 
 is_secure(sol::WorstCaseSolution) = sol.secure
@@ -212,6 +247,11 @@ statename(::BaseState) = "N"
 statename(s::ContingencyState) = "N-1[$(s.outage)]"
 statename(s::CorrectiveState) = "N-1/c[$(s.outage)]"
 
+statekind(::NominalState) = :nominal
+statekind(::BaseState) = :base
+statekind(::ContingencyState) = :contingency
+statekind(::CorrectiveState) = :corrective
+
 outage(::Union{NominalState,BaseState}) = nothing
 outage(s::Union{ContingencyState,CorrectiveState}) = s.outage
 
@@ -234,38 +274,103 @@ end
 
 _active(branches, out) = out === nothing ? branches : filter(b -> b.id != out, branches)
 
-# A monitored limit is either one number for every state, or a per-state NamedTuple.
+# A monitored limit selects by state — one value for every state, or a per-state `NamedTuple`.
 _limit(v::Number, ::State) = v
+_limit(v::Tuple, ::State) = v                                  # a direction pair, same everywhere
 _limit(v::NamedTuple, s::ContingencyState) = get(v, :contingency, v.base)
 _limit(v::NamedTuple, s::CorrectiveState) = get(v, :corrective, v.base)
 _limit(v::NamedTuple, ::State) = v.base
 
+# …and is then read as a pair of **per-direction** ratings `(lower, upper)`, with `lower < 0 < upper`.
+# A plain number `r` is the symmetric pair `(-r, r)`. Dividing the flow by the rating for its own
+# direction makes a violation `ratio > 1` in both cases, since the lower rating is negative.
+_limit_pair(x::Number) = (-abs(float(x)), abs(float(x)))
+function _limit_pair(x::Tuple)
+    lo, hi = float(x[1]), float(x[2])
+    (lo < 0 < hi) || throw(ArgumentError(
+        "a monitored limit pair must be (lower, upper) with lower < 0 < upper; got ($lo, $hi)"))
+    return (lo, hi)
+end
+
 # ---------------------------------------------------------------------------
 # Injection model (secondary frequency response / single slack)
 # ---------------------------------------------------------------------------
-# y = mid(lo, x, hi) = clamp(x, lo, hi), modelled exactly with two big-M selections.
-function _clamp!(model, x, lo, hi, M)
+# y = mid(lo, x, hi) = clamp(x, lo, hi), modelled exactly with two big-M selections. The two
+# selectors say which side is saturated, which callers use to express ordering between clamps.
+function _clamp_modes!(model, x, lo, hi, M)
     m = @variable(model); δ = @variable(model, binary = true)
     @constraint(model, m <= hi); @constraint(model, m <= x)
     @constraint(model, m >= hi - M * (1 - δ)); @constraint(model, m >= x - M * δ)
     y = @variable(model); γ = @variable(model, binary = true)
     @constraint(model, y >= lo); @constraint(model, y >= m)
     @constraint(model, y <= lo + M * (1 - γ)); @constraint(model, y <= m + M * γ)
-    return y
+    return y, δ, γ                      # δ ⇒ held at `hi`;  γ ⇒ held at `lo`
 end
 
-function _injection_model!(model, gm, participation, v, balance_M)
+_clamp!(model, x, lo, hi, M) = _clamp_modes!(model, x, lo, hi, M)[1]
+
+# Merit order. Every responding unit follows the same demand signal, so the one needing the least
+# signal per unit of contribution saturates first — the order is already implied by the clamps.
+# Stating it explicitly cuts off relaxation solutions that violate it, which tightens the search
+# without changing the answer. Sorting and constraining consecutive pairs gives the whole order by
+# transitivity, so this costs O(n) constraints rather than O(n²).
+function _merit_order!(model, normal, participation, at_hi, at_lo)
+    resp = [g for g in normal if participation[g.id] != 0]
+    length(resp) < 2 && return
+    up = sort(resp; by = g -> (g.pmax - g.p0) / participation[g.id])   # headroom per contribution
+    dn = sort(resp; by = g -> (g.p0 - g.pmin) / participation[g.id])
+    for i in 1:(length(up) - 1)
+        @constraint(model, at_hi[up[i + 1].id] <= at_hi[up[i].id])
+    end
+    for i in 1:(length(dn) - 1)
+        @constraint(model, at_lo[dn[i + 1].id] <= at_lo[dn[i].id])
+    end
+    # …and the signal has one sign, so no unit sits at its floor while another sits at its ceiling.
+    @constraint(model, at_hi[up[1].id] + at_lo[dn[1].id] <= 1)
+    return
+end
+
+# Emergency reserve: a unit that stays at its set point until every ordinary responding unit has
+# reached the bound in the direction the imbalance calls for, and only then follows a signal of its
+# own. Reserve is held back rather than shared, which is what distinguishes it from participation.
+function _emergency_response!(model, gm, participation, reserve, normal, Pg, M)
+    units = [g for g in gm.generators if g.id in reserve && haskey(participation, g.id)]
+    isempty(units) && return
+    λe = @variable(model, base_name = "λ_reserve")
+    up = @variable(model, binary = true, base_name = "reserve_up")
+    dn = @variable(model, binary = true, base_name = "reserve_down")
+    @constraint(model, up + dn <= 1)
+    for g in normal                                   # armed only once the others are exhausted
+        @constraint(model, Pg[g.id] >= g.pmax - M * (1 - up))
+        @constraint(model, Pg[g.id] <= g.pmin + M * (1 - dn))
+    end
+    @constraint(model, λe <= M * up)                  # unarmed ⇒ no signal ⇒ held at its set point
+    @constraint(model, λe >= -M * dn)
+    for g in units
+        Pg[g.id] = _clamp!(model, g.p0 + λe * participation[g.id], g.pmin, g.pmax, M)
+    end
+    return
+end
+
+function _injection_model!(model, gm, participation, v, balance_M; emergency = String[])
     nom = _nominal_injection(gm)
     if participation === nothing
         inj = Dict{String,Any}(n => nom[n] + (haskey(v, n) ? v[n] : 0.0) for n in gm.buses)
         return inj, nom, true
     end
+    resp = [g for g in gm.generators if haskey(participation, g.id)]
+    reserve = Set(collect(String, emergency))
+    normal = [g for g in resp if !(g.id in reserve)]
+
     λ = @variable(model, base_name = "λ")
     Pg = Dict{String,Any}()
-    for g in gm.generators
-        haskey(participation, g.id) || continue
-        Pg[g.id] = _clamp!(model, g.p0 + λ * participation[g.id], g.pmin, g.pmax, balance_M)
+    at_hi = Dict{String,VariableRef}(); at_lo = Dict{String,VariableRef}()
+    for g in normal
+        y, δ, γ = _clamp_modes!(model, g.p0 + λ * participation[g.id], g.pmin, g.pmax, balance_M)
+        Pg[g.id] = y; at_hi[g.id] = δ; at_lo[g.id] = γ
     end
+    _merit_order!(model, normal, participation, at_hi, at_lo)
+    _emergency_response!(model, gm, participation, reserve, normal, Pg, balance_M)
     inj = Dict{String,Any}()
     for n in gm.buses
         e = AffExpr(0.0)
@@ -305,9 +410,12 @@ struct StateBuilder
     inj::AbstractDict
     drop_slack::Bool
     M::Float64
+    bigMs::Dict{String,Float64}     # per-branch, from the physics; falls back to `M`
     tag::String
     memo::Dict{Any,Any}
 end
+
+_M(sb::StateBuilder, br::Branch) = get(sb.bigMs, br.id, sb.M)
 
 _dθ(br::Branch, θ) = θ[br.bus1] - θ[br.bus2]
 _is_automaton(sb::StateBuilder, br::Branch) = br isa Pst && haskey(sb.pst_model, br.id)
@@ -318,7 +426,7 @@ function _flow!(model, br::Line, θ, sb::StateBuilder)
 end
 
 _flow!(model, br::Hvdc, θ, sb::StateBuilder) =
-    _clamp!(model, br.p_zero + br.k * _dθ(br, θ), -br.p_lim, br.p_lim, sb.M)
+    _clamp!(model, br.p_zero + br.k * _dθ(br, θ), -br.p_lim, br.p_lim, _M(sb, br))
 
 function _flow!(model, br::Pst, θ, sb::StateBuilder)
     _is_automaton(sb, br) && return _automaton_flow!(model, br, θ, sb.st, sb, sb.pst_model[br.id])
@@ -328,7 +436,7 @@ end
 # A PST held at a given angle, optionally switchable: `open` is `nothing` (no switching), a
 # `Bool` (a fixed candidate) or a binary variable.
 function _switchable_pst_flow!(model, br::Pst, θ, sb::StateBuilder)
-    open = sb.open_of(br.id); plim = sb.plim_of(br.id, open); M = sb.M
+    open = sb.open_of(br.id); plim = sb.plim_of(br.id, open); M = _M(sb, br)
     nat = br.h * (_dθ(br, θ) + sb.angle_of(br.id))
     if open === nothing
         p = @variable(model); @constraint(model, p == nat); return p
@@ -434,20 +542,20 @@ end
 
 # Nominal: the device is inactive at α⁰; it may still trip on over-current.
 function _automaton_flow!(model, br::Pst, θ, ::NominalState, sb::StateBuilder, fp)
-    P, _ = _inactive_flow!(model, br, _dθ(br, θ), fp.p_lim, sb.M, _pref(sb, br))
+    P, _ = _inactive_flow!(model, br, _dθ(br, θ), fp.p_lim, _M(sb, br), _pref(sb, br))
     return P
 end
 
 # Base (N): as nominal, but a trip here is inherited by every later state.
 function _automaton_flow!(model, br::Pst, θ, ::BaseState, sb::StateBuilder, fp)
-    P, conn = _inactive_flow!(model, br, _dθ(br, θ), fp.p_lim, sb.M, _pref(sb, br))
+    P, conn = _inactive_flow!(model, br, _dθ(br, θ), fp.p_lim, _M(sb, br), _pref(sb, br))
     sb.memo[(:conn_N, br.id)] = conn
     return P
 end
 
 # Post-contingency (N-1): still inactive at α⁰, cannot reconnect if it tripped in N.
 function _automaton_flow!(model, br::Pst, θ, st::ContingencyState, sb::StateBuilder, fp)
-    P, conn = _inactive_flow!(model, br, _dθ(br, θ), fp.p_lim, sb.M, _pref(sb, br);
+    P, conn = _inactive_flow!(model, br, _dθ(br, θ), fp.p_lim, _M(sb, br), _pref(sb, br);
                               conn_max = sb.memo[(:conn_N, br.id)])
     sb.memo[(:conn_N1, br.id, st.outage)] = conn
     sb.memo[(:P_N1, br.id, st.outage)] = P
@@ -457,7 +565,7 @@ end
 # Post-corrective (N-1/c): the device activates once |P^{N-1}| ≥ P^act and then regulates toward
 # ±P^tar; otherwise it stays inactive at α⁰. Either way a trip inherited from N-1 keeps it open.
 function _automaton_flow!(model, br::Pst, θ, st::CorrectiveState, sb::StateBuilder, fp)
-    M = sb.M; Δθ = _dθ(br, θ); p_ref = _pref(sb, br)
+    M = _M(sb, br); Δθ = _dθ(br, θ); p_ref = _pref(sb, br)
     conn_N1 = sb.memo[(:conn_N1, br.id, st.outage)]
     P_N1 = sb.memo[(:P_N1, br.id, st.outage)]
     P_ia, _ = _inactive_flow!(model, br, Δθ, fp.p_lim, M, p_ref; conn_max = conn_N1)
@@ -472,13 +580,27 @@ function _automaton_flow!(model, br::Pst, θ, st::CorrectiveState, sb::StateBuil
     return P
 end
 
+# A state drops the branches that are out in it, so `_overloads` must skip ids it does not find —
+# which would also swallow a misspelled one, reporting a serene "secure" for a grid nothing was
+# actually monitored on. Catch that once, up front, against the whole network.
+function _check_monitored(gm::GridModel, monitored)
+    known = Set(b.id for b in gm.branches)
+    unknown = sort!([String(id) for id in keys(monitored) if !(id in known)])
+    isempty(unknown) || throw(ArgumentError("monitored branch(es) not in the network: " *
+        join(unknown, ", ") * "; known branches are " * join(sort!(collect(known)), ", ")))
+    return nothing
+end
+
+# Each entry pairs the overload expression with the element it belongs to, so whichever one the
+# solver ends up sitting on can be named afterwards rather than merely counted.
 function _overloads(P, monitored, st::State)
-    out = Any[]
+    out = Tuple{Any,Binding}[]
     for (id, limspec) in monitored
         haskey(P, id) || continue
-        lim = _limit(limspec, st)
-        push!(out, P[id] / lim - 1)
-        push!(out, -P[id] / lim - 1)
+        lo, hi = _limit_pair(_limit(limspec, st))
+        sn = statekind(st); oc = outage(st)
+        push!(out, (P[id] / hi - 1, Binding(id, sn, oc, :forward)))  # exceeds its forward rating
+        push!(out, (P[id] / lo - 1, Binding(id, sn, oc, :reverse)))  # …or the reverse one (lo < 0)
     end
     return out
 end
@@ -497,7 +619,7 @@ _plim_of(pst_limits) = (pst_id, open) -> (open === nothing ? Inf : get(pst_limit
 # ---------------------------------------------------------------------------
 function _build_program!(model, gm, states, monitored, correctives, switchable, pst_limits,
                          pst_model, inj_unc, inj_nom, drop_slack, M, tag_prefix,
-                         corr_angle, corr_open, on_overload)
+                         corr_angle, corr_open, on_overload; bigMs = Dict{String,Float64}())
     a0 = _pst_alpha0(gm)
     plim_of = _plim_of(pst_limits)
     memo = Dict{Any,Any}()
@@ -512,10 +634,10 @@ function _build_program!(model, gm, states, monitored, correctives, switchable, 
         end
         open_of = pid -> (cf !== nothing && pid in switchable ? corr_open(pid, cf) : nothing)
         sb = StateBuilder(gm, st, angle_of, open_of, plim_of, pst_model,
-                          has_uncertainty(st) ? inj_unc : inj_nom, drop_slack, M,
+                          has_uncertainty(st) ? inj_unc : inj_nom, drop_slack, M, bigMs,
                           "$(tag_prefix)$(statename(st))", memo)
-        for o in _overloads(_add_state!(model, sb), monitored, st)
-            on_overload(o)
+        for (o, lbl) in _overloads(_add_state!(model, sb), monitored, st)
+            on_overload(o, lbl)
         end
     end
 end
@@ -524,32 +646,462 @@ end
 # Corrective-response problem (LLP)
 # ---------------------------------------------------------------------------
 function _corrective_response(gm, states, monitored, correctives, switchable, contingencies,
-                              participation, pst_limits, pst_model, vstar, opt, silent, bigM, balance_M)
+                              participation, pst_limits, pst_model, vstar, opt, silent, bigM, balance_M,
+                              bigMs = Dict{String,Float64}(), emergency = String[],
+                              discrete = String[])
     model = Model(opt); silent && set_silent(model)
-    inj_unc, inj_nom, drop_slack = _injection_model!(model, gm, participation, vstar, balance_M)
-    ranges = Dict(b.id => (b.alpha_min, b.alpha_max) for b in gm.branches if b isa Pst)
-    α = Dict{Tuple{String,String},VariableRef}()
+    inj_unc, inj_nom, drop_slack = _injection_model!(model, gm, participation, vstar, balance_M; emergency = emergency)
+    psts = Dict(b.id => b for b in gm.branches if b isa Pst)
+    α = Dict{Tuple{String,String},Any}()
     op = Dict{Tuple{String,String},VariableRef}()
     for c in contingencies, pid in correctives
-        a = @variable(model, base_name = "α_$(pid)_$(c)")
-        set_lower_bound(a, ranges[pid][1]); set_upper_bound(a, ranges[pid][2])
-        α[(pid, c)] = a
+        br = psts[pid]
+        if pid in discrete && !isempty(br.taps)
+            # the tap changer can only stop where it has a tap: pick exactly one
+            z = @variable(model, [1:length(br.taps)], binary = true, base_name = "tap_$(pid)_$(c)")
+            @constraint(model, sum(z) == 1)
+            α[(pid, c)] = sum(br.taps[k] * z[k] for k in 1:length(br.taps))
+        else
+            a = @variable(model, base_name = "α_$(pid)_$(c)")
+            set_lower_bound(a, br.alpha_min); set_upper_bound(a, br.alpha_max)
+            α[(pid, c)] = a
+        end
         pid in switchable && (op[(pid, c)] = @variable(model, binary = true, base_name = "open_$(pid)_$(c)"))
     end
     @variable(model, η)
     # correctives are free variables here; every overload is an epigraph lower bound on η
+    terms = Tuple{Any,Binding}[]
     _build_program!(model, gm, states, monitored, correctives, switchable, pst_limits, pst_model,
                     inj_unc, inj_nom, drop_slack, bigM, "",
                     (pid, c) -> get(α, (pid, c), nothing),
                     (pid, c) -> get(op, (pid, c), nothing),
-                    o -> @constraint(model, η >= o))
+                    function (o, lbl)
+                        push!(terms, (o, lbl))
+                        @constraint(model, η >= o)
+                    end; bigMs = bigMs)
     @objective(model, Min, η)
     optimize!(model)
     ac = Dict((pid, c) => (alpha = value(α[(pid, c)]),
                            open = haskey(op, (pid, c)) ? value(op[(pid, c)]) > 0.5 : false)
               for c in contingencies, pid in correctives)
-    return objective_value(model), ac
+    # η sits on whichever epigraph bound is tightest: that element is what the response could not
+    # relieve, and naming it is what makes the value a certificate rather than a number.
+    binding = isempty(terms) ? nothing : terms[argmax([value(o) for (o, _) in terms])][2]
+    return objective_value(model), ac, binding
 end
+
+# ---------------------------------------------------------------------------
+# Per-branch big-M bounds
+#
+# Every disjunction here (a clamp, a trip, an activation) needs a constant large enough to make
+# its inactive side vacuous. A single hand-picked constant is both unsafe — too small silently
+# yields wrong answers — and wasteful, since a loose big-M weakens the relaxation the solver
+# works with. It has already collided with a model parameter once.
+#
+# Instead, bound each branch flow from the physics. In the DC model
+#
+#     P = PTDF · injection + PSDF · α
+#
+# so `|P_e| ≤ Σ_n |PTDF_{e,n}|·M_n + Σ_p |PSDF_{e,p}|·max|α_p|`, where `M_n` bounds the injection
+# at bus `n` using its generator limits, its load and its share of the uncertainty. The result is
+# rigorous, per-branch (so far tighter than one global constant), and closed-form — no solve, so
+# it cannot fail or time out. It is evaluated for every topology (intact and each outage) and,
+# where an HVDC is present, for both of its regimes, taking the largest.
+# ---------------------------------------------------------------------------
+_susceptance(br::Line) = br.h
+_susceptance(br::Pst)  = br.h
+_susceptance(br::Hvdc) = br.k
+
+# Largest injection magnitude each bus can reach.
+function _injection_bounds(gm, uncertain, ugens, participation)
+    out = Dict{String,Float64}()
+    for n in gm.buses
+        lo = -get(gm.load_by_bus, n, 0.0); hi = lo
+        for g in gm.generators
+            g.bus == n || continue
+            if participation !== nothing && haskey(participation, g.id)
+                lo += g.pmin; hi += g.pmax          # free to respond within its limits
+            else
+                lo += g.p0;   hi += g.p0            # held at its set point
+            end
+        end
+        if haskey(uncertain, n)
+            lo += uncertain[n][1]; hi += uncertain[n][2]
+        end
+        for g in ugens
+            g.bus == n || continue
+            cl, ch = _ug_range(g, :controllable); ul, uh = _ug_range(g, :uncontrollable)
+            lo += min(cl, 0.0) + ul; hi += max(ch, 0.0) + uh
+        end
+        out[n] = max(abs(lo), abs(hi))
+    end
+    return out
+end
+
+# Reduced inverse of the bus susceptance matrix; `nothing` if the topology is degenerate.
+function _bus_reactance(gm, active)
+    N = length(gm.buses); idx = Dict(b => i for (i, b) in enumerate(gm.buses))
+    B = zeros(N, N)
+    for br in active
+        h = _susceptance(br); i = idx[br.bus1]; j = idx[br.bus2]
+        B[i, i] += h; B[j, j] += h; B[i, j] -= h; B[j, i] -= h
+    end
+    si = idx[gm.slack]; keep = [i for i in 1:N if i != si]
+    isempty(keep) && return nothing, idx
+    X = zeros(N, N)
+    try
+        X[keep, keep] = inv(B[keep, keep])
+    catch
+        return nothing, idx
+    end
+    all(isfinite, X) || return nothing, idx
+    return X, idx
+end
+
+# Bounds are computed for *every* branch, not only the ones carrying flow: a branch that is out
+# or tripped still appears in the model through its would-be flow `h·(Δθ + α)`, which the
+# surrounding topology determines and which the disjunctions compare against.
+function _flow_bounds(gm, active, Mn, X, idx)
+    ptdf(e, n) = _susceptance(e) * (X[idx[e.bus1], n] - X[idx[e.bus2], n])
+    live = Set(br.id for br in active)
+    psts = [br for br in active if br isa Pst]
+    out = Dict{String,Float64}()
+    for e in gm.branches
+        b = 0.0
+        for (n, bus) in enumerate(gm.buses)
+            b += abs(ptdf(e, n)) * get(Mn, bus, 0.0)
+        end
+        for p in psts
+            amax = max(abs(p.alpha_min), abs(p.alpha_max))
+            amax == 0.0 && continue
+            psdf = -_susceptance(p) * (ptdf(e, idx[p.bus1]) - ptdf(e, idx[p.bus2])) +
+                   (e.id == p.id ? _susceptance(p) : 0.0)
+            b += abs(psdf) * amax
+        end
+        if e isa Pst && !(e.id in live)          # its own shift still offsets the would-be flow
+            b += _susceptance(e) * max(abs(e.alpha_min), abs(e.alpha_max))
+        end
+        out[e.id] = b
+    end
+    return out
+end
+
+# The device limits a branch's own disjunctions compare against.
+function _device_limit(br::Branch, pst_limits, pst_model)
+    br isa Hvdc && return isfinite(br.p_lim) ? br.p_lim : 0.0
+    br isa Pst || return 0.0
+    d = get(pst_limits, br.id, 0.0)
+    isfinite(d) || (d = 0.0)
+    if haskey(pst_model, br.id)
+        fp = pst_model[br.id]
+        d = max(d, maximum(x -> isfinite(x) ? x : 0.0, (fp.p_lim, fp.p_act, fp.p_tar)))
+    end
+    return d
+end
+
+"""
+    flow_bounds(gm, contingencies; uncertain, ugens, participation, pst_limits, pst_model)
+
+An upper bound on `|P_e|` for every branch, from the DC physics (see above) — evaluated over every
+reachable topology and valid whatever the uncertainty does. The big-M constants and the monitored
+screen are both read off it.
+"""
+function flow_bounds(gm, conts; uncertain = Dict{String,Tuple{Float64,Float64}}(),
+                     ugens = NamedTuple[], participation = nothing,
+                     pst_limits = Dict{String,Float64}(), pst_model = Dict{String,Any}())
+    Mn = _injection_bounds(gm, uncertain, ugens, participation)
+    hvdcs = [br for br in gm.branches if br isa Hvdc]
+    # A PST that can trip changes the topology too, so bound against those networks as well.
+    trippable = Any[nothing]
+    for br in gm.branches
+        br isa Pst || continue
+        (haskey(pst_model, br.id) || haskey(pst_limits, br.id)) && push!(trippable, br.id)
+    end
+    bounds = Dict{String,Float64}()
+    for out in vcat(Any[nothing], Any[c for c in conts]), gone in trippable
+        active = _active(_active(gm.branches, out), gone)
+        regimes = isempty(hvdcs) ? (:emulating,) : (:emulating, :clamped)
+        for regime in regimes
+            act = regime === :emulating ? active : filter(b -> !(b isa Hvdc), active)
+            Mn2 = Mn
+            if regime === :clamped
+                Mn2 = copy(Mn)                       # a clamped link is a fixed injection pair
+                for h in hvdcs
+                    lim = isfinite(h.p_lim) ? h.p_lim : 0.0
+                    Mn2[h.bus1] = get(Mn2, h.bus1, 0.0) + lim
+                    Mn2[h.bus2] = get(Mn2, h.bus2, 0.0) + lim
+                end
+            end
+            X, idx = _bus_reactance(gm, act)
+            X === nothing && continue
+            for (id, v) in _flow_bounds(gm, act, Mn2, X, idx)
+                bounds[id] = max(get(bounds, id, 0.0), v)
+            end
+        end
+    end
+    return Dict(br.id => get(bounds, br.id, 0.0) + _device_limit(br, pst_limits, pst_model)
+                for br in gm.branches)
+end
+
+"""
+    branch_bigM(gm, contingencies; uncertain, ugens, participation, pst_limits, pst_model, cap)
+
+Per-branch big-M constants derived from the DC physics (see above). `cap` bounds the result, for
+callers that want to keep a ceiling. The factor of two covers constraints that compare two bounded
+quantities (a flow against its would-be value, or against a device limit).
+"""
+branch_bigM(gm, conts; cap = Inf, kwargs...) =
+    Dict(id => min(cap, 2 * b + 1.0) for (id, b) in flow_bounds(gm, conts; kwargs...))
+
+# ---------------------------------------------------------------------------
+# Monitored-branch screening
+#
+# Model size grows linearly in the monitored set: every monitored branch contributes two overload
+# expressions per state, and in the medial each of those carries a selection binary. On a real
+# network most monitored branches are nowhere near their rating in any state, and carrying them
+# costs binaries for nothing.
+#
+# The flow bounds above settle it without a solve. They over-estimate the true flow, so a branch
+# whose bound cannot reach its rating can never be the one that fails, in any state, under any
+# uncertainty — and may be dropped outright.
+#
+# What this preserves *exactly*: the security verdict, and the frontier `min_violating_exchange`
+# reports, since neither depends on branches that cannot fail. What it does **not** preserve is the
+# value of `φ` on a comfortably secure grid: if the dropped branch happened to be the least slack
+# one, the reported `φ` falls to the next. That is why it is opt-in rather than automatic.
+# ---------------------------------------------------------------------------
+"""
+    max_overload_ratios(gm, monitored, contingencies; method = :bounds, ...) -> Dict(branch => ratio)
+
+The largest `|P| / rating` each monitored branch could reach, in any state, under any uncertainty —
+an over-estimate, so a branch whose value is below 1 can never be the one that fails.
+
+Two ways to compute it, and they differ only in how much they over-estimate:
+
+* `:bounds` (default) — read off [`flow_bounds`](@ref), pure arithmetic and no solve. Each bus is
+  free to take its worst injection independently of the others, which is looser than the physics
+  allows.
+* `:lp` — maximise the ratio itself over the model, one solve per branch, state and direction.
+  Balance across buses is enforced, so it is **tighter**; corrective controls are left free and
+  maximised, which is what keeps it an over-estimate rather than an answer.
+
+`:lp` accepts the modelling keywords of [`worst_case_oracle`](@ref) (`correctives`, `switchable`,
+`pst_limits`, `pst_model`, `participation`, `uncertain_generators`, `emergency`, `exchange`,
+`optimizer`); `:bounds` accepts those of [`flow_bounds`](@ref).
+"""
+function max_overload_ratios(gm::GridModel, monitored::AbstractDict, contingencies;
+                             method::Symbol = :bounds, uncertain = Dict{String,Tuple{Float64,Float64}}(),
+                             ugens = NamedTuple[], participation = nothing,
+                             pst_limits = Dict{String,Float64}(), pst_model = Dict{String,Any}(),
+                             correctives = String[], switchable = String[], emergency = String[],
+                             exchange = nothing, optimizer = HiGHS.Optimizer, silent = true,
+                             bigM = 1e4, balance_bigM = 1e5)
+    conts = collect(String, contingencies)
+    states = _states(conts)
+    if method === :bounds
+        bounds = flow_bounds(gm, conts; uncertain = uncertain, ugens = ugens,
+                             participation = participation, pst_limits = pst_limits,
+                             pst_model = pst_model)
+        out = Dict{String,Float64}()
+        for (id, limspec) in monitored
+            b = get(bounds, id, Inf)
+            worst = 0.0
+            for st in states
+                lo, hi = _limit_pair(_limit(limspec, st))
+                lim = min(hi, abs(lo))
+                lim > 0 && (worst = max(worst, b / lim))
+            end
+            out[id] = worst
+        end
+        return out
+    end
+    method === :lp || throw(ArgumentError("unknown method $(method); use :bounds or :lp"))
+    ratios, _ = _relaxed_ratios(gm, monitored, conts, states; uncertain = uncertain, ugens = ugens,
+        participation = participation, pst_limits = pst_limits, pst_model = pst_model,
+        correctives = correctives, switchable = switchable, emergency = emergency,
+        exchange = exchange, optimizer = optimizer, silent = silent, bigM = bigM,
+        balance_bigM = balance_bigM)
+    return ratios
+end
+
+# The relaxation the `:lp` screen maximises over: the full multi-state system with **no limit
+# enforced** and the corrective controls free. Leaving them free and maximising is what makes the
+# result an over-estimate — we do not know which response the lower level would pick, so we grant
+# the worst one. Every overload expression is `P/limit − 1`, so maximising it maximises the flow
+# against that rating; the two directions of a branch are its maximum and its minimum flow, which
+# is why no further solves are needed per branch.
+function _relaxed_ratios(gm, monitored, conts, states; uncertain, ugens, participation, pst_limits,
+                         pst_model, correctives, switchable, emergency, exchange, optimizer,
+                         silent, bigM, balance_bigM)
+    correctives = collect(String, correctives)
+    switch = Set(collect(String, switchable))
+    bigMs = flow_bounds(gm, conts; uncertain = uncertain, ugens = ugens,
+                        participation = participation, pst_limits = pst_limits,
+                        pst_model = pst_model)
+    bigMs = Dict(id => 2 * b + 1.0 for (id, b) in bigMs)
+
+    model = Model(optimizer); silent && set_silent(model)
+    v = _uncertainty_model!(model, uncertain, ugens)
+    _exchange_constraint!(model, v, exchange)
+    inj_unc, inj_nom, drop_slack = _injection_model!(model, gm, participation, v, balance_bigM;
+                                                     emergency = emergency)
+    psts = Dict(b.id => b for b in gm.branches if b isa Pst)
+    α = Dict{Tuple{String,String},Any}()
+    op = Dict{Tuple{String,String},VariableRef}()
+    for c in conts, pid in correctives
+        br = psts[pid]
+        a = @variable(model, base_name = "α_$(pid)_$(c)")
+        set_lower_bound(a, br.alpha_min); set_upper_bound(a, br.alpha_max)
+        α[(pid, c)] = a
+        pid in switch && (op[(pid, c)] = @variable(model, binary = true, base_name = "open_$(pid)_$(c)"))
+    end
+    terms = Tuple{Any,Binding}[]
+    _build_program!(model, gm, states, monitored, correctives, switch, pst_limits, pst_model,
+                    inj_unc, inj_nom, drop_slack, bigM, "",
+                    (pid, c) -> get(α, (pid, c), nothing),
+                    (pid, c) -> get(op, (pid, c), nothing),
+                    (o, lbl) -> push!(terms, (o, lbl)); bigMs = bigMs)
+
+    ratios = Dict{String,Float64}(id => 0.0 for id in keys(monitored))
+    best = nothing; bestval = -Inf
+    for (o, lbl) in terms
+        @objective(model, Max, o)
+        optimize!(model)
+        termination_status(model) == MOI.OPTIMAL || continue
+        r = objective_value(model) + 1          # the overload expression is P/limit − 1
+        r > ratios[lbl.branch] && (ratios[lbl.branch] = r)
+        r > bestval && (bestval = r; best = lbl)
+    end
+    return ratios, best
+end
+
+"""
+    filter_ratio(gm, monitored, contingencies; kwargs...) -> (ratio, binding)
+
+The single largest `|P| / rating` any monitored branch can reach, anywhere — the reference
+`filter` binary's output ("Maximal ratio of flow compared to limits is …"), plus which element
+attains it. Below 1 and no monitored branch can ever be violated.
+
+The reference packs this into one solve with a one-hot selection over every ratio, which needs a
+big-M its own source warns about: against a reverse rating of `−0.1` and a forward one of `10`, a
+flow of 20 gives ratios of `−200` and `2`, and a big-M chosen for the forward side breaks the
+disjunction. Maximising each ratio separately gives the same number with no big-M at all, and
+yields the per-branch detail as a by-product — so that is what this does.
+"""
+function filter_ratio(gm::GridModel, monitored::AbstractDict, contingencies; kwargs...)
+    conts = collect(String, contingencies)
+    ratios, best = _relaxed_ratios(gm, monitored, conts, _states(conts); _ratio_defaults(kwargs)...)
+    return (isempty(ratios) ? 0.0 : maximum(values(ratios))), best
+end
+
+function _ratio_defaults(kwargs)
+    d = Dict{Symbol,Any}(:uncertain => Dict{String,Tuple{Float64,Float64}}(), :ugens => NamedTuple[],
+        :participation => nothing, :pst_limits => Dict{String,Float64}(),
+        :pst_model => Dict{String,Any}(), :correctives => String[], :switchable => String[],
+        :emergency => String[], :exchange => nothing, :optimizer => HiGHS.Optimizer,
+        :silent => true, :bigM => 1e4, :balance_bigM => 1e5)
+    for (k, val) in kwargs
+        haskey(d, k) || throw(ArgumentError("unknown keyword $(k)"))
+        d[k] = val
+    end
+    return d
+end
+
+"""
+    screen_monitored(gm, monitored, contingencies; restriction = 0.0, method = :bounds, ...)
+        -> (kept, dropped)
+
+Split `monitored` into the branches that could bind and those that provably cannot, by comparing
+each branch's [`max_overload_ratios`](@ref) value against the threshold at which it would count as
+failing.
+
+A branch counts as failing once its flow reaches `(1 − restriction)` times its rating, so a
+positive `restriction` (a demanded margin) makes failure easier and drops fewer branches — the
+screen follows the same convention as the rest of the package.
+
+`method` picks how the ratio is obtained: `:bounds` (arithmetic, no solve) or `:lp` (one solve per
+branch, state and direction). Both are sound over-estimates and differ only in how much slack they
+leave: `:lp` enforces balance across buses where `:bounds` does not, so it is the tighter of the
+two on every case measured here and drops at least as much — pay for it when the monitored set is
+large enough that carrying a slack branch costs more than proving it slack.
+
+The kept set is never empty: if every branch clears its rating the one with the least slack is
+retained, so the reported `φ` still refers to something.
+"""
+function screen_monitored(gm::GridModel, monitored::AbstractDict, contingencies;
+                          restriction = 0.0, method::Symbol = :bounds, kwargs...)
+    slack = max_overload_ratios(gm, monitored, contingencies; method = method, kwargs...)
+    thr = 1 - restriction
+    kept = empty(monitored)
+    dropped = String[]
+    for (id, limspec) in monitored
+        # strict, with a relative guard: never drop on a knife edge
+        if slack[id] <= thr * (1 - 1e-9)
+            push!(dropped, id)
+        else
+            kept[id] = limspec
+        end
+    end
+    if isempty(kept) && !isempty(monitored)
+        keep = argmax(slack)                # the least slack branch stays, so φ keeps a referent
+        kept[keep] = monitored[keep]
+        filter!(!isequal(keep), dropped)
+    end
+    return kept, sort!(dropped)
+end
+
+# ---------------------------------------------------------------------------
+# Uncertainty set
+#
+# Two kinds of uncertainty compose into one deviation per bus:
+#
+#  * a plain **box** per bus (`uncertain`), for injections that move independently;
+#  * **uncertain generators** (`uncertain_generators`), whose deviation splits into an
+#    *uncontrollable* part free within its own bounds and a *controllable* part that is **coupled
+#    across every such generator**: they share a budget, and a single sign decides the direction
+#    they all move in.
+#
+# The coupling matters. With independent boxes the worst case may push one generator to its
+# positive bound while pulling another to its negative bound — a large internal transfer that a
+# common-mode uncertainty (a forecast error shared across a region) cannot actually produce. The
+# shared sign forbids exactly that.
+# ---------------------------------------------------------------------------
+_ug_range(g, field) = hasproperty(g, field) ? getproperty(g, field) : (0.0, 0.0)
+
+function _uncertainty_model!(model, uncertain, ugens)
+    dev = Dict{String,Any}()
+    for (n, (lo, hi)) in uncertain
+        vn = @variable(model, base_name = "v_$(n)"); set_lower_bound(vn, lo); set_upper_bound(vn, hi)
+        e = AffExpr(0.0); add_to_expression!(e, vn); dev[n] = e
+    end
+    isempty(ugens) && return dev
+
+    pos  = @variable(model, binary = true, base_name = "ug_positive")   # one sign for all of them
+    bpos = @variable(model, lower_bound = 0.0, base_name = "ug_budget_pos")
+    bneg = @variable(model, lower_bound = 0.0, base_name = "ug_budget_neg")
+    @constraint(model, bpos <= sum(_ug_range(g, :controllable)[2] for g in ugens; init = 0.0) * pos)
+    @constraint(model, bneg <= sum(-_ug_range(g, :controllable)[1] for g in ugens; init = 0.0) * (1 - pos))
+
+    ctl = VariableRef[]
+    for g in ugens
+        clo, chi = _ug_range(g, :controllable)
+        ulo, uhi = _ug_range(g, :uncontrollable)
+        c = @variable(model, base_name = "ug_ctl_$(g.id)")
+        u = @variable(model, base_name = "ug_unc_$(g.id)")
+        set_lower_bound(u, ulo); set_upper_bound(u, uhi)
+        @constraint(model, c <= chi * pos)              # all positive together …
+        @constraint(model, c >= clo * (1 - pos))        # … or all negative together
+        @constraint(model, c <= bpos)                   # each is bounded by the shared budget
+        @constraint(model, c >= -bneg)
+        push!(ctl, c)
+        e = get!(dev, g.bus, AffExpr(0.0))
+        add_to_expression!(e, c); add_to_expression!(e, u); dev[g.bus] = e
+    end
+    @constraint(model, sum(ctl) == bpos - bneg)         # the budget the group may spend
+    return dev
+end
+
+_uncertain_buses(uncertain, ugens) = union(Set(keys(uncertain)), Set(g.bus for g in ugens))
 
 # ---------------------------------------------------------------------------
 # Exchange parameterisation
@@ -581,18 +1133,15 @@ end
 # ---------------------------------------------------------------------------
 function _relaxed_medial(gm, states, monitored, uncertain, correctives, switchable, contingencies,
                          participation, pst_limits, pst_model, candidates, bigM, opt, silent, balance_M,
-                         exchange = nothing)
+                         exchange = nothing, ugens = NamedTuple[], bigMs = Dict{String,Float64}(),
+                         emergency = String[])
     model = Model(opt); silent && set_silent(model)
-    v = Dict{String,Any}()
-    for (n, (lo, hi)) in uncertain
-        vn = @variable(model, base_name = "v_$(n)"); set_lower_bound(vn, lo); set_upper_bound(vn, hi)
-        v[n] = vn
-    end
+    v = _uncertainty_model!(model, uncertain, ugens)
     # Exchange parameterisation: the net injection deviation of a zone is the *exchange*, and the
     # uncertainty is restricted to realisations achieving an exchange in the given range. The
     # per-bus box then bounds how the exchange may be composed, not how large it is.
     _exchange_constraint!(model, v, exchange)
-    inj_unc, inj_nom, drop_slack = _injection_model!(model, gm, participation, v, balance_M)
+    inj_unc, inj_nom, drop_slack = _injection_model!(model, gm, participation, v, balance_M; emergency = emergency)
     @variable(model, η)
     # each candidate corrective response is a fixed menu entry; a binary picks the branch/state
     # that binds, so η is the worst overload the uncertainty can force against that response
@@ -602,15 +1151,158 @@ function _relaxed_medial(gm, states, monitored, uncertain, correctives, switchab
                         inj_unc, inj_nom, drop_slack, bigM, "c$(j)_",
                         (pid, c) -> (haskey(cand, (pid, c)) ? cand[(pid, c)].alpha : nothing),
                         (pid, c) -> (haskey(cand, (pid, c)) ? cand[(pid, c)].open : nothing),
-                        function (o)
+                        function (o, _)
                             b = @variable(model, binary = true); push!(sel, b)
                             @constraint(model, η <= o + bigM * (1 - b))
-                        end)
+                        end; bigMs = bigMs)
         @constraint(model, sum(sel) == 1)
     end
     @objective(model, Max, η)
     optimize!(model)
-    return objective_value(model), Dict(n => value(v[n]) for n in keys(uncertain))
+    return objective_value(model), Dict(n => value(v[n]) for n in keys(v))
+end
+
+# ---------------------------------------------------------------------------
+# The exchange master, and its balanced medial
+#
+# The reference does not put the exchange in the objective. It runs a Blankenship–Falk pair: an
+# outer program (`ulp`) that maximises the exchange subject to every scenario collected so far, and
+# a medial (`mlp`) that, at the candidate exchange, hunts for a scenario no corrective response can
+# fix. Each scenario found cuts the master down; when the medial finds none, the candidate is the
+# answer. Written out, the master constraint is
+#
+#     E_point[d] ≥ E_max − BigE·(1 − ignore[d]) + ub_restrict·BigE
+#
+# so each stored point must either satisfy its limits outright (`ignore = 0`, no slack is granted)
+# or be pushed to an exchange at or above the candidate (`ignore = 1`). Points reaching us are
+# already genuine violations, so only the second branch is ever live and the master reduces to
+# keeping the candidate below every cut — `ub_restrict` shifting it further down.
+#
+# The medial's objective is what makes the loop move, and it is easy to overlook:
+#
+#     max t   s.t.  t ≤ min_d violation[d],   t ≤ 0.001·(E_max − E),   t ≤ 100·E
+#
+# A plain worst-violation search would return a scenario sitting at the top of the allowed range,
+# cutting the master by nothing and stalling. The first cap prices a *low* exchange, so the medial
+# returns the strongest cut it can find rather than the largest violation; the second stops it
+# collapsing to the worthless scenario at zero. Both caps are non-negative exactly on `0 ≤ E ≤
+# E_max`, so `t > 0` still means precisely "a violation exists strictly inside the range" — which
+# is the termination test.
+#
+# The flip side, and the reason the reference keeps a certificate pass on a force level: a balanced
+# medial says nothing about the *ends* of the range. That is what "balanced scenario generation did
+# not finish" means, and why level 1 asks for an unbalanced sweep afterwards.
+# ---------------------------------------------------------------------------
+"""
+    discretization_exchange(network; zone, uncertain, monitored, e_cap, ...) -> (emax, iterations, cuts)
+
+Largest securable zone exchange, by the reference's route: a master maximising the exchange over
+the scenarios collected so far, alternating with a **balanced medial** that looks for the strongest
+cut — a violation at as low an exchange as it can find.
+
+`balance_low` and `balance_high` are the two caps on the medial objective (`0.001` and `100` in the
+reference). `restriction` is its `ub_restrict`, shifting the master's candidate down by
+`restriction · e_cap` each round so the answer comes back conservative.
+
+Returns the exchange, the number of master iterations, and the cuts that produced it. This is an
+independent route to what [`min_violating_exchange`](@ref) obtains in one solve — slower, and the
+reason to keep it is that agreement between two different algorithms is worth more than either.
+"""
+function discretization_exchange(network;
+                                 zone, uncertain::AbstractDict, monitored::AbstractDict, e_cap::Real,
+                                 correctives = String[], contingencies = String[],
+                                 participation::Union{Nothing,AbstractDict} = nothing,
+                                 hvdc = NamedTuple[], switchable = String[],
+                                 pst_limits::AbstractDict = Dict{String,Float64}(),
+                                 pst_model::AbstractDict = Dict{String,Any}(),
+                                 uncertain_generators = NamedTuple[], auto_bigM = true,
+                                 emergency = String[], discrete = String[],
+                                 slack::Union{Nothing,String} = nothing,
+                                 optimizer = HiGHS.Optimizer, restriction = 0.0, tol = 1e-5,
+                                 direction = -1.0, offset = 0.0, screen = false,
+                                 balance_low = 1e-3, balance_high = 100.0,
+                                 max_iter = 30, menu_iter = 30, bigM = 1e4, balance_bigM = 1e5,
+                                 silent = true)
+    gm = GridModel(network; slack = slack)
+    for h in hvdc
+        push!(gm.branches, Hvdc(h.id, h.bus1, h.bus2, h.p_zero, h.k, h.p_lim))
+    end
+    _check_monitored(gm, monitored)
+    conts = collect(String, contingencies)
+    if screen !== false
+        monitored, _ = screen_monitored(gm, monitored, conts; restriction = restriction,
+                                        method = (screen === true ? :bounds : screen),
+                                        uncertain = uncertain, ugens = collect(uncertain_generators),
+                                        participation = participation, pst_limits = pst_limits,
+                                        pst_model = pst_model, correctives = correctives,
+                                        switchable = switchable, emergency = emergency,
+                                        optimizer = optimizer, silent = silent)
+    end
+    correctives = collect(String, correctives)
+    switch = Set(collect(String, switchable))
+    states = _states(conts)
+    zone = collect(String, zone)
+    ugens = collect(uncertain_generators)
+    bigMs = auto_bigM ? branch_bigM(gm, conts; uncertain = uncertain, ugens = ugens,
+                                    participation = participation, pst_limits = pst_limits,
+                                    pst_model = pst_model) : Dict{String,Float64}()
+    Cand = Dict{Tuple{String,String},NamedTuple{(:alpha, :open),Tuple{Float64,Bool}}}
+
+    emax = float(e_cap)
+    cuts = Float64[]
+    for k in 1:max_iter
+        # MEDIAL: the strongest cut available below the current candidate. The corrective menu is
+        # grown exactly as in the cut programme — a candidate scenario is only believed once the
+        # full corrective freedom has failed to fix it.
+        menu = Cand[Cand()]
+        cut = nothing
+        for _ in 1:menu_iter
+            model = Model(optimizer); silent && set_silent(model)
+            v = _uncertainty_model!(model, uncertain, ugens)
+            E = @variable(model, base_name = "E"); set_lower_bound(E, 0.0); set_upper_bound(E, emax)
+            @constraint(model, zone_exchange(v, (buses = zone,)) == direction * E + offset)
+            inj_unc, inj_nom, drop_slack = _injection_model!(model, gm, participation, v, balance_bigM; emergency = emergency)
+            η = @variable(model, base_name = "eta")
+            for (j, cand) in enumerate(menu)
+                sel = VariableRef[]
+                _build_program!(model, gm, states, monitored, correctives, switch, pst_limits, pst_model,
+                                inj_unc, inj_nom, drop_slack, bigM, "d$(j)_",
+                                (pid, c) -> (haskey(cand, (pid, c)) ? cand[(pid, c)].alpha : nothing),
+                                (pid, c) -> (haskey(cand, (pid, c)) ? cand[(pid, c)].open : nothing),
+                                function (o, _)
+                                    b = @variable(model, binary = true); push!(sel, b)
+                                    @constraint(model, η <= o + bigM * (1 - b))
+                                end; bigMs = bigMs)
+                @constraint(model, sum(sel) == 1)
+            end
+            # the two balance caps: prefer a low exchange, but not the worthless one at zero
+            @constraint(model, η <= balance_low * (emax - E))
+            @constraint(model, η <= balance_high * E)
+            @objective(model, Max, η)
+            optimize!(model)
+            termination_status(model) == MOI.OPTIMAL || break
+            objective_value(model) <= -restriction + tol && break   # nothing violates inside
+            vstar = Dict(n => value(v[n]) for n in keys(v))
+            e = value(E)
+            phi, ac, _ = _corrective_response(gm, states, monitored, correctives, switch, conts,
+                                              participation, pst_limits, pst_model, vstar,
+                                              optimizer, silent, bigM, balance_bigM, bigMs,
+                                              emergency, discrete)
+            if phi > -restriction - tol
+                cut = e                                # a genuine violation at this exchange
+                break
+            end
+            push!(menu, ac)                            # correctable ⇒ enrich and retry
+        end
+        cut === nothing && return (emax, k, cuts)      # medial found nothing: the candidate holds
+        push!(cuts, cut)
+        # MASTER: keep the candidate below every cut, shifted down by the restriction.
+        next = cut - restriction * e_cap
+        next >= emax - tol && (next = emax - max(tol, restriction * e_cap))   # always make progress
+        emax = max(0.0, next)
+        emax <= tol && return (0.0, k, cuts)
+    end
+    return (emax, max_iter, cuts)
 end
 
 # ---------------------------------------------------------------------------
@@ -625,6 +1317,12 @@ end
 # corrective freedom, and if it turns out correctable the response that fixes it is added and the
 # minimisation repeated. On exit the scenario defeats *all* corrective responses, so its exchange
 # is the frontier — reached by cutting, not by bisection.
+#
+# `restriction` shifts what counts as failing and takes either sign, so the same program bounds the
+# frontier from both sides: a required margin (`> 0`) makes failure easier to reach and reports an
+# achievable **lower** bound, a tolerated overload (`< 0`) makes it harder and reports an **upper**
+# bound. Both are valid on return, not merely in the limit, because the exit test verifies against
+# the full corrective freedom rather than the menu.
 # ---------------------------------------------------------------------------
 """
     min_violating_exchange(network; zone, uncertain, monitored, e_cap, ...) -> (exchange, injection) | nothing
@@ -633,8 +1331,32 @@ The smallest zone import at which no corrective response keeps every monitored b
 limits, searched within `[0, e_cap]`. Returns `nothing` when the grid is securable across the
 whole range — i.e. when `e_cap` itself is achievable.
 
-`restriction` requires the violation to exceed a margin, making the answer conservative. All other
-keywords match [`worst_case_oracle`](@ref).
+`direction` selects the sense of the transfer — `-1` (the default) measures an **import** by the
+zone, `+1` an **export** — and `offset` shifts the zero point when the forecast exchange is itself
+non-zero, so that `E` is measured from the intended reference rather than from the forecast. The
+zone's net deviation is held at `direction * E + offset`.
+
+`restriction` is a **margin on what counts as failing**, with the same meaning and the same
+direction as in [`worst_case_oracle`](@ref), and it may be given either sign — which is what makes
+this one function bound the frontier from both sides:
+
+* `restriction > 0` (a required security margin) — a branch fails once it no longer keeps the
+  margin, so more scenarios qualify and the reported frontier moves **down**. Everything below it
+  is correctable *with* margin, hence certainly secure: the value is a **lower bound**, guaranteed
+  achievable.
+* `restriction = 0` — bare violation, and the value is the frontier itself.
+* `restriction < 0` (a tolerated overload) — a branch fails only once it overloads by `|restriction|`,
+  so fewer scenarios qualify and the frontier moves **up**. Anything the grid can hold must lie
+  below it: the value is an **upper bound**.
+
+Running the two signs therefore brackets the exact answer, which is what the reference's auxiliary
+heuristic does with its own restriction parameter (of the opposite sign convention).
+
+The value is **exact** on return at `restriction = 0`, not tolerance-limited: the menu minimiser
+satisfies `E_menu ≤ E_true`, and when it is verified to defeat *every* corrective response it also
+witnesses `E_true ≤ e`, so the two coincide. The bounding property of the two signed variants
+likewise holds on return rather than only in the limit, because the exit test verifies the scenario
+against the *full* corrective freedom, not merely against the menu.
 """
 function min_violating_exchange(network;
                                 zone, uncertain::AbstractDict, monitored::AbstractDict, e_cap::Real,
@@ -643,55 +1365,71 @@ function min_violating_exchange(network;
                                 hvdc = NamedTuple[], switchable = String[],
                                 pst_limits::AbstractDict = Dict{String,Float64}(),
                                 pst_model::AbstractDict = Dict{String,Any}(),
+                                uncertain_generators = NamedTuple[], auto_bigM = true,
+                                emergency = String[], discrete = String[],
                                 slack::Union{Nothing,String} = nothing,
                                 optimizer = HiGHS.Optimizer, restriction = 0.0, tol = 1e-5,
+                                direction = -1.0, offset = 0.0, screen = false,
                                 max_iter = 30, bigM = 1e4, balance_bigM = 1e5, silent = true)
     gm = GridModel(network; slack = slack)
     for h in hvdc
         push!(gm.branches, Hvdc(h.id, h.bus1, h.bus2, h.p_zero, h.k, h.p_lim))
     end
+    _check_monitored(gm, monitored)
     conts = collect(String, contingencies)
+    if screen !== false
+        monitored, _ = screen_monitored(gm, monitored, conts; restriction = restriction,
+                                        method = (screen === true ? :bounds : screen),
+                                        uncertain = uncertain, ugens = collect(uncertain_generators),
+                                        participation = participation, pst_limits = pst_limits,
+                                        pst_model = pst_model, correctives = correctives,
+                                        switchable = switchable, emergency = emergency,
+                                        optimizer = optimizer, silent = silent)
+    end
     correctives = collect(String, correctives)
     switch = Set(collect(String, switchable))
     states = _states(conts)
     zone = collect(String, zone)
+    ugens = collect(uncertain_generators)
+    bigMs = auto_bigM ? branch_bigM(gm, conts; uncertain = uncertain, ugens = ugens,
+                                    participation = participation, pst_limits = pst_limits,
+                                    pst_model = pst_model) : Dict{String,Float64}()
 
     Cand = Dict{Tuple{String,String},NamedTuple{(:alpha, :open),Tuple{Float64,Bool}}}
     menu = Cand[Cand()]
 
     for _ in 1:max_iter
         model = Model(optimizer); silent && set_silent(model)
-        v = Dict{String,Any}()
-        for (n, (lo, hi)) in uncertain
-            vn = @variable(model, base_name = "v_$(n)"); set_lower_bound(vn, lo); set_upper_bound(vn, hi)
-            v[n] = vn
-        end
+        v = _uncertainty_model!(model, uncertain, ugens)
         E = @variable(model, base_name = "E"); set_lower_bound(E, 0.0); set_upper_bound(E, e_cap)
-        @constraint(model, zone_exchange(v, (buses = zone,)) == -E)   # import ⇒ negative deviation
-        inj_unc, inj_nom, drop_slack = _injection_model!(model, gm, participation, v, balance_bigM)
+        # The zone's net deviation realises the exchange: `direction` selects which way the
+        # transfer runs (−1, the default, is an import by the zone) and `offset` shifts the zero
+        # point when the forecast exchange is not itself zero.
+        @constraint(model, zone_exchange(v, (buses = zone,)) == direction * E + offset)
+        inj_unc, inj_nom, drop_slack = _injection_model!(model, gm, participation, v, balance_bigM; emergency = emergency)
         for (j, cand) in enumerate(menu)
             sel = VariableRef[]
             _build_program!(model, gm, states, monitored, correctives, switch, pst_limits, pst_model,
                             inj_unc, inj_nom, drop_slack, bigM, "m$(j)_",
                             (pid, c) -> (haskey(cand, (pid, c)) ? cand[(pid, c)].alpha : nothing),
                             (pid, c) -> (haskey(cand, (pid, c)) ? cand[(pid, c)].open : nothing),
-                            function (o)
+                            function (o, _)
                                 b = @variable(model, binary = true); push!(sel, b)
-                                @constraint(model, o >= restriction - bigM * (1 - b))
-                            end)
+                                @constraint(model, o >= -restriction - bigM * (1 - b))
+                            end; bigMs = bigMs)
             @constraint(model, sum(sel) == 1)      # this response must leave some branch violated
         end
         @objective(model, Min, E)
         optimize!(model)
         termination_status(model) == MOI.OPTIMAL || return nothing   # nothing violates within e_cap
         e = value(E)
-        vstar = Dict(n => value(v[n]) for n in keys(uncertain))
+        vstar = Dict(n => value(v[n]) for n in keys(v))
 
         # Verify the candidate against the full corrective freedom, not just the menu.
-        phi, ac = _corrective_response(gm, states, monitored, correctives, switch, conts,
+        phi, ac, _ = _corrective_response(gm, states, monitored, correctives, switch, conts,
                                        participation, pst_limits, pst_model, vstar,
-                                       optimizer, silent, bigM, balance_bigM)
-        phi > restriction - tol && return (e, vstar)   # genuinely uncorrectable ⇒ the frontier
+                                       optimizer, silent, bigM, balance_bigM, bigMs, emergency, discrete)
+        phi > -restriction - tol && return (e, vstar)  # genuinely uncorrectable ⇒ the frontier
         push!(menu, ac)                                # correctable ⇒ enrich the menu and retry
     end
     return nothing
@@ -724,10 +1462,26 @@ Besides `uncertain`, `monitored`, `correctives`, `contingencies` and `participat
   with the trip propagating forward through the states. Its multiple (locally-consistent)
   equilibria are resolved to the physical one by a connected-reference trip test, so the automaton
   composes with the free `correctives` (the max/min bounds meet).
-* `restriction` — tighten the security test by `ε_R ≥ 0`: the grid counts as secure only with a
-  margin, `φ ≤ −ε_R`. A restricted answer is **conservative**, so a configuration it accepts is
-  securable with room to spare — the restriction-of-the-right-hand-side idea, used to obtain
-  guaranteed-achievable values rather than the exact frontier. `0` gives the exact test.
+* `monitored` — `Dict(branch_id => limit)`. A limit is a plain number `r` (the symmetric rating
+  `±r`), a `(lower, upper)` pair when the branch is rated differently per flow direction (with
+  `lower < 0 < upper`), or a `NamedTuple` `(; base, contingency, corrective)` whose entries are
+  themselves numbers or pairs, selecting per-state ratings.
+* `discrete` — PST ids whose corrective angle must land on an actual **tap**, rather than moving
+  continuously. Modelled as a one-hot choice over the device's tap table, so the answer is one the
+  tap changer can really reach.
+* `emergency` — generator ids held as **reserve**: they stay at their set point until every other
+  responding generator has reached the bound in the direction the imbalance calls for, and only
+  then respond. Reserve is held back rather than shared, unlike ordinary `participation`.
+* `restriction` — shift the security test by `ε_R`: the grid counts as secure when `φ ≤ −ε_R`.
+  A positive `ε_R` demands a margin, so a configuration it accepts is securable with room to spare
+  — the restriction-of-the-right-hand-side idea, used to obtain guaranteed-achievable values rather
+  than the exact frontier. A negative `ε_R` tolerates an overload of `|ε_R|` and so relaxes the
+  test, which is the direction that yields outer bounds. `0` gives the exact test.
+* `screen` — drop monitored branches that provably cannot fail, shrinking the model
+  (see [`screen_monitored`](@ref)). `true` (or `:bounds`) screens by arithmetic on the flow bounds;
+  `:lp` proves it by optimisation, which is tighter but costs solves. The security verdict is
+  unchanged either way; a reported `φ` on a comfortably secure grid may fall to the next-tightest
+  branch, which is why it is opt-in.
 * `exchange` — `(; buses, lo, hi)` to use the **exchange parameterisation**: the uncertainty is
   restricted to realisations whose net injection deviation over `buses` (the zone's exchange) lies
   in `[lo, hi]`. `uncertain` then bounds how the exchange may be composed per bus, while `lo`/`hi`
@@ -740,6 +1494,8 @@ function worst_case_oracle(network;
                            hvdc = NamedTuple[], switchable = String[], pst_limits::AbstractDict = Dict{String,Float64}(),
                            pst_model::AbstractDict = Dict{String,Any}(),
                            exchange = nothing, restriction = 0.0,
+                           uncertain_generators = NamedTuple[], auto_bigM = true,
+                           emergency = String[], discrete = String[], screen = false,
                            slack::Union{Nothing,String} = nothing,
                            optimizer = HiGHS.Optimizer, tol = 1e-5, max_iter = 30,
                            bigM = 1e4, balance_bigM = 1e5, silent = true)
@@ -747,16 +1503,31 @@ function worst_case_oracle(network;
     for h in hvdc
         push!(gm.branches, Hvdc(h.id, h.bus1, h.bus2, h.p_zero, h.k, h.p_lim))
     end
+    _check_monitored(gm, monitored)
     conts = collect(String, contingencies)
+    if screen !== false
+        monitored, _ = screen_monitored(gm, monitored, conts; restriction = restriction,
+                                        method = (screen === true ? :bounds : screen),
+                                        uncertain = uncertain, ugens = collect(uncertain_generators),
+                                        participation = participation, pst_limits = pst_limits,
+                                        pst_model = pst_model, correctives = correctives,
+                                        switchable = switchable, emergency = emergency,
+                                        optimizer = optimizer, silent = silent)
+    end
     correctives = collect(String, correctives)
     switch = Set(collect(String, switchable))
     states = _states(conts)
+    ugens = collect(uncertain_generators)
+    bigMs = auto_bigM ? branch_bigM(gm, conts; uncertain = uncertain, ugens = ugens,
+                                    participation = participation, pst_limits = pst_limits,
+                                    pst_model = pst_model) : Dict{String,Float64}()
 
     Cand = Dict{Tuple{String,String},NamedTuple{(:alpha, :open),Tuple{Float64,Bool}}}
     candidates = Cand[Cand()]
     best_lb = -Inf
-    vstar = Dict(n => 0.0 for n in keys(uncertain))
+    vstar = Dict(n => 0.0 for n in _uncertain_buses(uncertain, ugens))
     corrective = Cand()
+    binding = nothing
     ub = Inf
     iterations = 0
 
@@ -767,22 +1538,23 @@ function worst_case_oracle(network;
     # (physical evaluation) agree: a single pass suffices and the reported `φ` is the response value.
     if isempty(correctives) && isempty(switch)
         ub, vstar = _relaxed_medial(gm, states, monitored, uncertain, correctives, switch, conts,
-                                    participation, pst_limits, pst_model, candidates, bigM, optimizer, silent, balance_bigM, exchange)
-        lb, _ = _corrective_response(gm, states, monitored, correctives, switch, conts,
-                                     participation, pst_limits, pst_model, vstar, optimizer, silent, bigM, balance_bigM)
+                                    participation, pst_limits, pst_model, candidates, bigM, optimizer, silent, balance_bigM, exchange, ugens, bigMs, emergency)
+        lb, _, bind = _corrective_response(gm, states, monitored, correctives, switch, conts,
+                                     participation, pst_limits, pst_model, vstar, optimizer, silent, bigM, balance_bigM, bigMs, emergency, discrete)
         return WorstCaseSolution(lb, lb <= tol - restriction, vstar,
-                                 Dict{String,Dict{String,Float64}}(), 1, lb, ub)
+                                 Dict{String,Dict{String,Float64}}(), 1, lb, ub, bind)
     end
 
     for k in 1:max_iter
         iterations = k
         ub, vstar = _relaxed_medial(gm, states, monitored, uncertain, correctives, switch, conts,
-                                    participation, pst_limits, pst_model, candidates, bigM, optimizer, silent, balance_bigM, exchange)
-        lb, ac = _corrective_response(gm, states, monitored, correctives, switch, conts,
-                                      participation, pst_limits, pst_model, vstar, optimizer, silent, bigM, balance_bigM)
+                                    participation, pst_limits, pst_model, candidates, bigM, optimizer, silent, balance_bigM, exchange, ugens, bigMs, emergency)
+        lb, ac, bind = _corrective_response(gm, states, monitored, correctives, switch, conts,
+                                      participation, pst_limits, pst_model, vstar, optimizer, silent, bigM, balance_bigM, bigMs, emergency, discrete)
         if lb > best_lb
             best_lb = lb
             corrective = ac
+            binding = bind
         end
         ub - lb <= tol && break
         push!(candidates, ac)
@@ -795,7 +1567,7 @@ function worst_case_oracle(network;
     end
 
     phi = best_lb
-    return WorstCaseSolution(phi, phi <= tol - restriction, vstar, corr_by_c, iterations, best_lb, ub)
+    return WorstCaseSolution(phi, phi <= tol - restriction, vstar, corr_by_c, iterations, best_lb, ub, binding)
 end
 
 end # module

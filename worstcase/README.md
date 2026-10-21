@@ -132,6 +132,44 @@ A `monitored` limit may be a plain number (same in every state) or a `NamedTuple
 `(; base, contingency, corrective)` selecting per-state limits (`base` is also used for the
 nominal state and as the fallback).
 
+`sol.binding` names the branch, state and direction `φ` was attained on — what makes the number
+checkable rather than merely reported.
+
+### Screening the monitored set
+
+Model size grows linearly in the monitored set: each branch adds two overload expressions per
+state, and each of those carries a selection binary in the medial. Most monitored branches on a
+real network are nowhere near their rating in any state.
+
+`flow_bounds` bounds `|P_e|` per branch from the DC physics alone — over every reachable topology
+and whatever the uncertainty does — so a branch whose bound cannot reach its rating can never be
+the one that fails and need not be modelled:
+
+```julia
+kept, dropped = screen_monitored(GridModel(network), monitored, contingencies;
+                                 uncertain = box, participation = part)
+
+sol = worst_case_oracle(network; ..., screen = true)   # or let the oracle do it
+```
+
+There are two ways to over-estimate that ratio, and `method` picks between them:
+
+| | how | on the test fixture |
+|---|---|---|
+| `:bounds` (default) | interval arithmetic on `flow_bounds`; every bus free to take its worst injection independently | `L12a` 3.60, `L2b_3` 0.75 |
+| `:lp` | maximise the ratio over the model, one solve per branch/state/direction; balance enforced, correctives free and maximised | `L12a` 1.95, `L2b_3` 0.50 |
+
+Both are sound; enforcing balance is worth roughly a factor of two, so `:lp` drops more. It costs
+solves, which is worth it once the monitored set is large enough that carrying a slack branch costs
+more than proving it slack. `max_overload_ratios` returns the per-branch values directly, and
+`filter_ratio` the single largest with the element attaining it.
+
+This preserves the security verdict exactly, and the frontier `min_violating_exchange` reports,
+since neither can depend on a branch that never fails. It does **not** preserve the value of `φ` on
+a comfortably secure grid: drop the least-slack branch and the reported `φ` falls to the next one.
+Hence opt-in. The kept set is never empty — if nothing can bind, the least-slack branch stays so
+`φ` keeps a referent.
+
 ## Scope (first slice)
 
 Uncertainty = injection deviations; correctives = **continuous PST angles**; the four states
